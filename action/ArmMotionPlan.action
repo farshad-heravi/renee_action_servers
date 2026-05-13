@@ -1,0 +1,12 @@
+# MoveIt arm motion planning (pose goal in planning frame)
+geometry_msgs/PoseStamped target_pose
+string planning_pipeline_id # e.g., "ompl", "pilz_industrial_motion_planner", "chomp"
+string planner_id # e.g., "RRTConnect", "LIN", "PTP", "CHOMP"
+string tcp_link # e.g., "ur5_gripper_tcp" (optional; empty uses server default)
+float64 velocity_scaling # 0.0-1.0; 0 or negative uses server default
+float64 acceleration_scaling # 0.0-1.0; 0 or negative uses server default
+---
+bool success
+string message
+---
+geometry_msgs/PoseStamped current_pose
