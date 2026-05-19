@@ -61,7 +61,7 @@ def generate_launch_description():
     )
     # Start after move_group + RViz timer in start_moveit (8s) with margin
     delayed_arm_motion_server = TimerAction(
-        period=15.0,
+        period=30.0,
         actions=[arm_motion_plan_server],
     )
 
