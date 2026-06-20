@@ -1,0 +1,11 @@
+# Plan and execute arm motion to a joint-space configuration
+string[] joint_names
+float64[] joint_positions
+string planning_pipeline_id  # e.g., "ompl", "pilz_industrial_motion_planner"
+string planner_id             # e.g., "RRTConnect", "PTP"
+float64 velocity_scaling      # 0.0-1.0; 0 or negative uses server default
+float64 acceleration_scaling  # 0.0-1.0; 0 or negative uses server default
+---
+bool success
+string message
+---

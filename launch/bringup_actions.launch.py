@@ -59,10 +59,24 @@ def generate_launch_description():
             'planning_group': 'arm',
         }],
     )
-    # Start after move_group + RViz timer in start_moveit (8s) with margin
+
+    # MoveIt-backed ArmJointMotionPlan server at /moveit_arm_joint_motion_plan
+    arm_joint_motion_plan_server = Node(
+        package='renee_action_servers',
+        executable='arm_joint_motion_plan_server',
+        name='arm_joint_motion_plan_server',
+        output='screen',
+        parameters=[{
+            'use_sim_time': LaunchConfiguration('use_sim_time'),
+            'move_group_namespace': 'robot',
+            'planning_group': 'arm',
+        }],
+    )
+
+    # Start both after move_group + RViz timer in start_moveit (8s) with margin
     delayed_arm_motion_server = TimerAction(
         period=30.0,
-        actions=[arm_motion_plan_server],
+        actions=[arm_motion_plan_server, arm_joint_motion_plan_server],
     )
 
     # container = ComposableNodeContainer(

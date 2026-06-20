@@ -17,6 +17,7 @@ find_package(tf2_ros REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "action/ArmMotionPlan.action"
+  "action/ArmJointMotionPlan.action"
   DEPENDENCIES geometry_msgs
 )
 
@@ -32,7 +33,16 @@ ament_target_dependencies(arm_motion_plan_server
 )
 target_link_libraries(arm_motion_plan_server "${cpp_typesupport_target}")
 
-install(TARGETS arm_motion_plan_server
+add_executable(arm_joint_motion_plan_server src/arm_joint_motion_plan_server.cpp)
+ament_target_dependencies(arm_joint_motion_plan_server
+  rclcpp
+  rclcpp_action
+  moveit_ros_planning_interface
+  tf2_ros
+)
+target_link_libraries(arm_joint_motion_plan_server "${cpp_typesupport_target}")
+
+install(TARGETS arm_motion_plan_server arm_joint_motion_plan_server
   DESTINATION lib/${PROJECT_NAME}
 )
 
