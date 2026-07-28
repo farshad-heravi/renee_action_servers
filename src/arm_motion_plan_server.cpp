@@ -26,6 +26,17 @@ public:
     default_velocity_scaling_ = this->declare_parameter<double>("default_velocity_scaling", 0.25);
     default_acceleration_scaling_ = this->declare_parameter<double>("default_acceleration_scaling", 0.25);
 
+    const bool use_sim_time = this->has_parameter("use_sim_time") ?
+      this->get_parameter("use_sim_time").as_bool() :
+      this->declare_parameter<bool>("use_sim_time", false);
+
+    rclcpp::NodeOptions moveit_node_options;
+    moveit_node_options.use_global_arguments(false);
+    moveit_node_options.parameter_overrides({rclcpp::Parameter("use_sim_time", use_sim_time)});
+    moveit_node_options.automatically_declare_parameters_from_overrides(true);
+    moveit_node_ = std::make_shared<rclcpp::Node>(
+      "arm_motion_plan_server_moveit_client", this->get_namespace(), moveit_node_options);
+
     action_server_ = rclcpp_action::create_server<ArmMotionPlan>(
       this,
       "moveit_arm_motion_plan",
@@ -67,7 +78,8 @@ private:
 
   void execute(const std::shared_ptr<GoalHandleArmMotionPlan> goal_handle)
   {
-    rclcpp::Node::SharedPtr node = shared_from_this();
+    std::lock_guard<std::mutex> execute_lock(execute_mutex_);
+    rclcpp::Node::SharedPtr node = moveit_node_;
     const auto goal = goal_handle->get_goal();
     auto result = std::make_shared<ArmMotionPlan::Result>();
 
@@ -140,6 +152,8 @@ private:
   double default_acceleration_scaling_{0.25};
 
   std::mutex mgi_mutex_;
+  std::mutex execute_mutex_;
+  rclcpp::Node::SharedPtr moveit_node_;
   std::shared_ptr<moveit::planning_interface::MoveGroupInterface> active_mgi_;
 };
 
