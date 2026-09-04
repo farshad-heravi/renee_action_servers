@@ -1,0 +1,17 @@
+# Compute a coordinated mobile-base and arm placement for a desired camera pose.
+geometry_msgs/PoseStamped camera_pose
+# Optional per-goal override. Empty uses the server configuration or ZED2i fallback.
+string camera_link
+bool lock_current_base
+---
+bool success
+string message
+string resolved_camera_link
+geometry_msgs/PoseStamped base_pose
+geometry_msgs/PoseStamped end_effector_pose
+sensor_msgs/JointState arm_solution
+float64 score
+---
+string phase
+uint32 candidates_evaluated
+uint32 valid_candidates

@@ -30,12 +30,18 @@ public:
       this->get_parameter("use_sim_time").as_bool() :
       this->declare_parameter<bool>("use_sim_time", false);
 
+    if(!move_group_ns_.empty() && move_group_ns_.front()!='/') {
+      move_group_ns_.insert(0, "/");
+    }
+
     rclcpp::NodeOptions moveit_node_options;
     moveit_node_options.use_global_arguments(false);
     moveit_node_options.parameter_overrides({rclcpp::Parameter("use_sim_time", use_sim_time)});
     moveit_node_options.automatically_declare_parameters_from_overrides(true);
     moveit_node_ = std::make_shared<rclcpp::Node>(
-      "arm_motion_plan_server_moveit_client", this->get_namespace(), moveit_node_options);
+      "arm_motion_plan_server_moveit_client",
+      move_group_ns_, 
+      moveit_node_options);
 
     action_server_ = rclcpp_action::create_server<ArmMotionPlan>(
       this,

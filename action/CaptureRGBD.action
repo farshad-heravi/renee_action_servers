@@ -1,0 +1,14 @@
+# Capture one synchronized RGB-D keyframe from the latest camera data.
+string waypoint_id
+string session_dir
+---
+bool success
+string message
+builtin_interfaces/Time timestamp
+string rgb_path
+string depth_path
+string metadata_path
+geometry_msgs/PoseStamped robot_pose
+geometry_msgs/PoseStamped camera_pose
+---
+string phase

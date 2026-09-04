@@ -7,18 +7,28 @@ endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
+find_package(builtin_interfaces REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(moveit_ros_planning_interface REQUIRED)
+find_package(moveit_msgs REQUIRED)
+find_package(nav2_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+find_package(renee_perception REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
+  "action/CameraPlacement.action"
   "action/ArmMotionPlan.action"
   "action/ArmJointMotionPlan.action"
-  DEPENDENCIES geometry_msgs
+  "action/CaptureRGBD.action"
+  DEPENDENCIES builtin_interfaces geometry_msgs sensor_msgs
 )
 
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
@@ -42,7 +52,44 @@ ament_target_dependencies(arm_joint_motion_plan_server
 )
 target_link_libraries(arm_joint_motion_plan_server "${cpp_typesupport_target}")
 
-install(TARGETS arm_motion_plan_server arm_joint_motion_plan_server
+add_executable(camera_placement_action_server
+  src/camera_placement_action_server.cpp
+)
+ament_target_dependencies(camera_placement_action_server
+  rclcpp
+  rclcpp_action
+  geometry_msgs
+  sensor_msgs
+  nav2_msgs
+  nav_msgs
+  moveit_msgs
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
+)
+target_link_libraries(camera_placement_action_server "${cpp_typesupport_target}")
+
+add_executable(capture_rgbd_action_server
+  src/capture_rgbd_action_server.cpp
+)
+target_compile_features(capture_rgbd_action_server PUBLIC cxx_std_17)
+ament_target_dependencies(capture_rgbd_action_server
+  builtin_interfaces
+  geometry_msgs
+  rclcpp
+  rclcpp_action
+  renee_perception
+  sensor_msgs
+  tf2
+  tf2_ros
+)
+target_link_libraries(capture_rgbd_action_server "${cpp_typesupport_target}")
+
+install(TARGETS
+  arm_motion_plan_server
+  arm_joint_motion_plan_server
+  camera_placement_action_server
+  capture_rgbd_action_server
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -74,7 +121,7 @@ install(TARGETS arm_motion_plan_server arm_joint_motion_plan_server
 
 
 install(
-    DIRECTORY launch
+    DIRECTORY config launch
     DESTINATION share/${PROJECT_NAME}
 )
 

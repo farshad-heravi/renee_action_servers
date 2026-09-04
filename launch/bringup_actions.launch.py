@@ -11,6 +11,7 @@ from launch.actions import (
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
 from launch.substitutions import LaunchConfiguration
+from launch.conditions import IfCondition
 from ament_index_python.packages import get_package_share_directory
 import os
 import yaml
@@ -31,7 +32,7 @@ def _on_success_or_shutdown(actions, failure_message):
     return _handler
 
 def generate_launch_description():
-    """Bring up MoveIt, then the ArmMotionPlan action server (after move_group is up)."""
+    """Bring up MoveIt and its optional action servers after move_group is ready."""
     
     # Get path to kinematics configuration
     moveit_config_pkg = get_package_share_directory('renee_rbvogui_plus_moveit_config')
@@ -59,9 +60,49 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'use_rviz',
-            default_value='true',
-            description='Start MoveIt RViz',
+            default_value='false',
+            description='Start a dedicated MoveIt RViz instance',
         ),
+        DeclareLaunchArgument(
+            'start_camera_placement_server',
+            default_value='false',
+            description='Start the /camera_placement planner action server',
+        ),
+        DeclareLaunchArgument(
+            'start_capture_rgbd_server',
+            default_value='false',
+            description='Start the /capture_rgbd action server',
+        ),
+        DeclareLaunchArgument(
+            'camera_placement_params_file',
+            default_value=os.path.join(
+                get_package_share_directory('renee_action_servers'),
+                'config',
+                'camera_placement_sim.yaml',
+            ),
+            description='Parameters for the CameraPlacement action server',
+        ),
+        DeclareLaunchArgument(
+            'capture_rgbd_params_file',
+            default_value=os.path.join(
+                get_package_share_directory('renee_action_servers'),
+                'config',
+                'rgbd_capture_sim.yaml',
+            ),
+            description='Parameters for the CaptureRGBD action server',
+        ),
+        DeclareLaunchArgument(
+            'wrist_camera',
+            default_value='stereolabs_zed2i',
+            choices=['stereolabs_zed2i', 'realsense_d435i', 'none'],
+            description='Camera type to use on the wrist (none = no camera)',
+        ),
+        DeclareLaunchArgument(
+            'is_localization_enabled',
+            default_value='false',
+            description='Localization publishes robot_map→robot_odom; if false, a static transform is published instead',
+        ),
+        
     ]
 
     # start moveit (move_group is delayed ~8s inside start_moveit.launch.py)
@@ -72,6 +113,8 @@ def generate_launch_description():
         launch_arguments={
             'use_sim_time': LaunchConfiguration('use_sim_time'),
             'use_rviz': LaunchConfiguration('use_rviz'),
+            'wrist_camera': LaunchConfiguration('wrist_camera'),
+            'is_localization_enabled': LaunchConfiguration('is_localization_enabled'),
         }.items(),
     )
 
@@ -101,7 +144,31 @@ def generate_launch_description():
         }],
     )
 
-    # Start both action servers once move_group's action interface is actually up
+    camera_placement_server = Node(
+        package='renee_action_servers',
+        executable='camera_placement_action_server',
+        name='camera_placement_action_server',
+        output='screen',
+        parameters=[
+            LaunchConfiguration('camera_placement_params_file'),
+            {'use_sim_time': LaunchConfiguration('use_sim_time')},
+        ],
+        condition=IfCondition(LaunchConfiguration('start_camera_placement_server')),
+    )
+
+    capture_rgbd_server = Node(
+        package='renee_action_servers',
+        executable='capture_rgbd_action_server',
+        name='capture_rgbd_action_server',
+        output='screen',
+        parameters=[
+            LaunchConfiguration('capture_rgbd_params_file'),
+            {'use_sim_time': LaunchConfiguration('use_sim_time')},
+        ],
+        condition=IfCondition(LaunchConfiguration('start_capture_rgbd_server')),
+    )
+
+    # Start action servers once move_group's action interface is actually up.
     wait_for_action_server_move_group = ExecuteProcess(
         cmd=['wait_for_ros', '--timeout', '90', 'action', '/robot/move_action'],
         name='wait_for_action_server_move_group',
@@ -137,6 +204,8 @@ def generate_launch_description():
     return LaunchDescription(
         declared_arguments + [
             start_moveit_node,
+            capture_rgbd_server,
+            camera_placement_server,
             wait_for_action_server_move_group,
             start_arm_motion_servers_when_ready,
             # container,
