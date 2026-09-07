@@ -10,8 +10,9 @@ from launch.actions import (
 )
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch.conditions import IfCondition
+from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import get_package_share_directory
 import os
 import yaml
@@ -57,6 +58,27 @@ def generate_launch_description():
             'use_sim_time',
             default_value='true',
             description='Use simulation time',
+        ),
+        DeclareLaunchArgument(
+            'real_robot',
+            default_value='false',
+            choices=['true', 'false'],
+            description='Connect MoveIt to the real UR5e instead of Gazebo',
+        ),
+        DeclareLaunchArgument(
+            'robot_ip',
+            default_value='',
+            description='IP address of the UR5e (required in real mode)',
+        ),
+        DeclareLaunchArgument(
+            'reverse_ip',
+            default_value='',
+            description='IP address of this PC as reached by the UR5e',
+        ),
+        DeclareLaunchArgument(
+            'kinematics_params_file',
+            default_value='',
+            description='Absolute path to the extracted UR5e calibration YAML',
         ),
         DeclareLaunchArgument(
             'use_rviz',
@@ -106,12 +128,23 @@ def generate_launch_description():
     ]
 
     # start moveit (move_group is delayed ~8s inside start_moveit.launch.py)
+    effective_use_sim_time = ParameterValue(
+        PythonExpression([
+            "'", LaunchConfiguration('real_robot'), "' != 'true' and '",
+            LaunchConfiguration('use_sim_time'), "' == 'true'",
+        ]),
+        value_type=bool,
+    )
     start_moveit_node = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(get_package_share_directory('renee_rbvogui_plus_moveit_config'), 'launch', 'start_moveit.launch.py')
         ),
         launch_arguments={
             'use_sim_time': LaunchConfiguration('use_sim_time'),
+            'real_robot': LaunchConfiguration('real_robot'),
+            'robot_ip': LaunchConfiguration('robot_ip'),
+            'reverse_ip': LaunchConfiguration('reverse_ip'),
+            'kinematics_params_file': LaunchConfiguration('kinematics_params_file'),
             'use_rviz': LaunchConfiguration('use_rviz'),
             'wrist_camera': LaunchConfiguration('wrist_camera'),
             'is_localization_enabled': LaunchConfiguration('is_localization_enabled'),
@@ -125,7 +158,7 @@ def generate_launch_description():
         name='arm_motion_plan_server',
         output='screen',
         parameters=[{
-            'use_sim_time': LaunchConfiguration('use_sim_time'),
+            'use_sim_time': effective_use_sim_time,
             'move_group_namespace': 'robot',
             'planning_group': 'arm',
         }],
@@ -138,7 +171,7 @@ def generate_launch_description():
         name='arm_joint_motion_plan_server',
         output='screen',
         parameters=[{
-            'use_sim_time': LaunchConfiguration('use_sim_time'),
+            'use_sim_time': effective_use_sim_time,
             'move_group_namespace': 'robot',
             'planning_group': 'arm',
         }],
@@ -151,7 +184,7 @@ def generate_launch_description():
         output='screen',
         parameters=[
             LaunchConfiguration('camera_placement_params_file'),
-            {'use_sim_time': LaunchConfiguration('use_sim_time')},
+            {'use_sim_time': effective_use_sim_time},
         ],
         condition=IfCondition(LaunchConfiguration('start_camera_placement_server')),
     )
@@ -163,7 +196,7 @@ def generate_launch_description():
         output='screen',
         parameters=[
             LaunchConfiguration('capture_rgbd_params_file'),
-            {'use_sim_time': LaunchConfiguration('use_sim_time')},
+            {'use_sim_time': effective_use_sim_time},
         ],
         condition=IfCondition(LaunchConfiguration('start_capture_rgbd_server')),
     )
