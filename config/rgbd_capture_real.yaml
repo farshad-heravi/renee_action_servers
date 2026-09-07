@@ -1,11 +1,11 @@
 capture_rgbd_action_server:
   ros__parameters:
-    rgb_topic: /zed/zed_node/left/image_rect_color
-    depth_topic: /zed/zed_node/depth/depth_registered
-    camera_info_topic: /zed/zed_node/left/camera_info
+    rgb_topic: /robot/arm_rgbd_camera/color/image_raw
+    depth_topic: /robot/arm_rgbd_camera/depth/image_rect_raw
+    camera_info_topic: /robot/arm_rgbd_camera/color/camera_info
     session_dir: /tmp/renee_scan_session
-    world_frame: world
+    world_frame: robot_map
     robot_frame: robot_base_link
-    camera_frame: camera_optical_frame
+    camera_frame: robot_arm_rgbd_camera_color_optical_frame
     sync_tolerance_ms: 50.0
     tf_timeout_sec: 0.5

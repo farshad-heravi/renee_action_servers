@@ -96,6 +96,18 @@ def generate_launch_description():
             description='Start the /capture_rgbd action server',
         ),
         DeclareLaunchArgument(
+            'start_wrist_camera',
+            default_value='false',
+            choices=['true', 'false'],
+            description='Start the physical RealSense wrist camera',
+        ),
+        DeclareLaunchArgument(
+            'use_camera_rviz',
+            default_value='false',
+            choices=['true', 'false'],
+            description='Open the dedicated RGB/depth RealSense RViz preview',
+        ),
+        DeclareLaunchArgument(
             'camera_placement_params_file',
             default_value=os.path.join(
                 get_package_share_directory('renee_action_servers'),
@@ -201,6 +213,20 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('start_capture_rgbd_server')),
     )
 
+    wrist_camera_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(
+                get_package_share_directory('renee_perception'),
+                'launch',
+                'realsense_wrist.launch.py',
+            )
+        ),
+        launch_arguments={
+            'use_rviz': LaunchConfiguration('use_camera_rviz'),
+        }.items(),
+        condition=IfCondition(LaunchConfiguration('start_wrist_camera')),
+    )
+
     # Start action servers once move_group's action interface is actually up.
     wait_for_action_server_move_group = ExecuteProcess(
         cmd=['wait_for_ros', '--timeout', '90', 'action', '/robot/move_action'],
@@ -237,6 +263,7 @@ def generate_launch_description():
     return LaunchDescription(
         declared_arguments + [
             start_moveit_node,
+            wrist_camera_launch,
             capture_rgbd_server,
             camera_placement_server,
             wait_for_action_server_move_group,
