@@ -55,17 +55,17 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'robot_ip',
-            default_value='',
+            default_value='192.168.0.101',
             description='IP address of the UR5e (required in real mode)',
         ),
         DeclareLaunchArgument(
             'reverse_ip',
-            default_value='',
+            default_value='192.168.0.150',
             description='IP address of this PC as reached by the UR5e',
         ),
         DeclareLaunchArgument(
             'kinematics_params_file',
-            default_value='',
+            default_value='/fnh_pkgs/ur5e_calibration.yaml',
             description='Absolute path to the extracted UR5e calibration YAML',
         ),
         DeclareLaunchArgument(
