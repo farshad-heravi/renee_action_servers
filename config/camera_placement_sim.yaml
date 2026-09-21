@@ -1,9 +1,0 @@
-camera_placement_action_server:
-  ros__parameters:
-    # Empty selects the Stereolabs ZED2i fallback.
-    # camera_placement.camera_link: ""
-    camera_placement.camera_link : robot_arm_rgbd_camera_color_optical_frame # use it for realsense
-    # Retry failed candidates without collision checking and report whether IK
-    # or collision filtering caused the rejection. Disable after diagnosis.
-    camera_placement.diagnose_ik_failures: false
-    camera_placement.ik_timeout_sec: 0.5 # if NO_IK solution is found within this time, the candidate is rejected

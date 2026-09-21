@@ -10,12 +10,11 @@ from launch.actions import (
 )
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
-from launch.substitutions import LaunchConfiguration, PythonExpression
-from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
+from launch.conditions import IfCondition, UnlessCondition
 from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import get_package_share_directory
 import os
-import yaml
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 
 
@@ -34,17 +33,6 @@ def _on_success_or_shutdown(actions, failure_message):
 
 def generate_launch_description():
     """Bring up MoveIt and its optional action servers after move_group is ready."""
-    
-    # Get path to kinematics configuration
-    moveit_config_pkg = get_package_share_directory('renee_rbvogui_plus_moveit_config')
-    kinematics_yaml_path = os.path.join(moveit_config_pkg, 'config', 'kinematics.yaml')
-    
-    # Load kinematics parameters from YAML file
-    with open(kinematics_yaml_path, 'r') as file:
-        kinematics_config = yaml.safe_load(file)
-    
-    # Prepare parameters with proper namespace
-    robot_description_kinematics = {'robot_description_kinematics': kinematics_config}
     
     # server_component = ComposableNode(
     #     package='renee_action_servers',
@@ -86,20 +74,14 @@ def generate_launch_description():
             description='Start a dedicated MoveIt RViz instance',
         ),
         DeclareLaunchArgument(
-            'start_camera_placement_server',
+            'start_camera_placement',
             default_value='false',
             description='Start the /camera_placement planner action server',
         ),
         DeclareLaunchArgument(
-            'start_capture_rgbd_server',
+            'start_capture_rgbd',
             default_value='false',
             description='Start the /capture_rgbd action server',
-        ),
-        DeclareLaunchArgument(
-            'start_wrist_camera',
-            default_value='false',
-            choices=['true', 'false'],
-            description='Start the physical RealSense wrist camera',
         ),
         DeclareLaunchArgument(
             'use_camera_rviz',
@@ -107,24 +89,10 @@ def generate_launch_description():
             choices=['true', 'false'],
             description='Open the dedicated RGB/depth RealSense RViz preview',
         ),
-        DeclareLaunchArgument(
-            'camera_placement_params_file',
-            default_value=os.path.join(
-                get_package_share_directory('renee_action_servers'),
-                'config',
-                'camera_placement_sim.yaml',
-            ),
-            description='Parameters for the CameraPlacement action server',
-        ),
-        DeclareLaunchArgument(
-            'capture_rgbd_params_file',
-            default_value=os.path.join(
-                get_package_share_directory('renee_action_servers'),
-                'config',
-                'rgbd_capture_sim.yaml',
-            ),
-            description='Parameters for the CaptureRGBD action server',
-        ),
+        DeclareLaunchArgument('realsense_serial_no', default_value="''"),
+        DeclareLaunchArgument('realsense_depth_profile', default_value='848x480x30'),
+        DeclareLaunchArgument('realsense_color_profile', default_value='848x480x30'),
+        DeclareLaunchArgument('realsense_infra_profile', default_value='848x480x30'),
         DeclareLaunchArgument(
             'wrist_camera',
             default_value='stereolabs_zed2i',
@@ -147,19 +115,33 @@ def generate_launch_description():
         ]),
         value_type=bool,
     )
-    start_moveit_node = IncludeLaunchDescription(
+    start_moveit_sim = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(get_package_share_directory('renee_rbvogui_plus_moveit_config'), 'launch', 'start_moveit.launch.py')
         ),
+        condition=UnlessCondition(LaunchConfiguration('real_robot')),
         launch_arguments={
             'use_sim_time': LaunchConfiguration('use_sim_time'),
-            'real_robot': LaunchConfiguration('real_robot'),
+            'use_rviz': LaunchConfiguration('use_rviz'),
+            'wrist_camera': LaunchConfiguration('wrist_camera'),
+            'is_localization_enabled': LaunchConfiguration('is_localization_enabled'),
+        }.items(),
+    )
+    start_moveit_real = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(
+                get_package_share_directory('renee_rbvogui_plus_moveit_config'),
+                'launch',
+                'start_moveit_real.launch.py',
+            )
+        ),
+        condition=IfCondition(LaunchConfiguration('real_robot')),
+        launch_arguments={
             'robot_ip': LaunchConfiguration('robot_ip'),
             'reverse_ip': LaunchConfiguration('reverse_ip'),
             'kinematics_params_file': LaunchConfiguration('kinematics_params_file'),
             'use_rviz': LaunchConfiguration('use_rviz'),
             'wrist_camera': LaunchConfiguration('wrist_camera'),
-            'is_localization_enabled': LaunchConfiguration('is_localization_enabled'),
         }.items(),
     )
 
@@ -195,10 +177,14 @@ def generate_launch_description():
         name='camera_placement_action_server',
         output='screen',
         parameters=[
-            LaunchConfiguration('camera_placement_params_file'),
+            PathJoinSubstitution([
+                get_package_share_directory('renee_action_servers'),
+                'config',
+                'camera_placement.yaml',
+            ]),
             {'use_sim_time': effective_use_sim_time},
         ],
-        condition=IfCondition(LaunchConfiguration('start_camera_placement_server')),
+        condition=IfCondition(LaunchConfiguration('start_camera_placement')),
     )
 
     capture_rgbd_server = Node(
@@ -207,10 +193,29 @@ def generate_launch_description():
         name='capture_rgbd_action_server',
         output='screen',
         parameters=[
-            LaunchConfiguration('capture_rgbd_params_file'),
-            {'use_sim_time': effective_use_sim_time},
+            PathJoinSubstitution([
+                get_package_share_directory('renee_action_servers'),
+                'config',
+                PythonExpression([
+                    "'rgbd_capture_real.yaml' if '", LaunchConfiguration('real_robot'),
+                    "' == 'true' else 'rgbd_capture_sim.yaml'",
+                ]),
+            ]),
+            {
+                'use_sim_time': effective_use_sim_time,
+                'camera_model': LaunchConfiguration('wrist_camera'),
+                'camera_frame': PythonExpression([
+                    "'robot_arm_rgbd_camera_left_camera_optical_frame' if '",
+                    LaunchConfiguration('wrist_camera'),
+                    "' == 'stereolabs_zed2i' else "
+                    "'robot_arm_rgbd_camera_color_optical_frame'",
+                ]),
+            },
         ],
-        condition=IfCondition(LaunchConfiguration('start_capture_rgbd_server')),
+        condition=IfCondition(PythonExpression([
+            "'", LaunchConfiguration('start_capture_rgbd'), "' == 'true' and '",
+            LaunchConfiguration('wrist_camera'), "' != 'none'",
+        ])),
     )
 
     wrist_camera_launch = IncludeLaunchDescription(
@@ -223,8 +228,15 @@ def generate_launch_description():
         ),
         launch_arguments={
             'use_rviz': LaunchConfiguration('use_camera_rviz'),
+            'serial_no': LaunchConfiguration('realsense_serial_no'),
+            'depth_profile': LaunchConfiguration('realsense_depth_profile'),
+            'color_profile': LaunchConfiguration('realsense_color_profile'),
+            'infra_profile': LaunchConfiguration('realsense_infra_profile'),
         }.items(),
-        condition=IfCondition(LaunchConfiguration('start_wrist_camera')),
+        condition=IfCondition(PythonExpression([
+            "'", LaunchConfiguration('real_robot'), "' == 'true' and '",
+            LaunchConfiguration('wrist_camera'), "' == 'realsense_d435i'",
+        ])),
     )
 
     # Start action servers once move_group's action interface is actually up.
@@ -262,7 +274,8 @@ def generate_launch_description():
 
     return LaunchDescription(
         declared_arguments + [
-            start_moveit_node,
+            start_moveit_sim,
+            start_moveit_real,
             wrist_camera_launch,
             capture_rgbd_server,
             camera_placement_server,
