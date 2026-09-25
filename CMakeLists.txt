@@ -29,6 +29,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "action/ArmMotionPlan.action"
   "action/ArmJointMotionPlan.action"
   "action/CaptureRGBD.action"
+  "action/CaptureZedImage.action"
   DEPENDENCIES builtin_interfaces geometry_msgs sensor_msgs
 )
 
@@ -88,11 +89,22 @@ ament_target_dependencies(capture_rgbd_action_server
 )
 target_link_libraries(capture_rgbd_action_server "${cpp_typesupport_target}")
 
+add_executable(zed_ssh_capture_action_server
+  src/zed_ssh_capture_action_server.cpp
+)
+target_compile_features(zed_ssh_capture_action_server PUBLIC cxx_std_17)
+ament_target_dependencies(zed_ssh_capture_action_server
+  rclcpp
+  rclcpp_action
+)
+target_link_libraries(zed_ssh_capture_action_server "${cpp_typesupport_target}")
+
 install(TARGETS
   arm_motion_plan_server
   arm_joint_motion_plan_server
   camera_placement_action_server
   capture_rgbd_action_server
+  zed_ssh_capture_action_server
   DESTINATION lib/${PROJECT_NAME}
 )
 

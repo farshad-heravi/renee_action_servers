@@ -1,0 +1,15 @@
+# Trigger an SSH-based ZED capture on the Jetson. The dataset stays on the
+# Jetson; transfer it manually afterwards (e.g. ./sync_jetson.sh --pull).
+string session_dir
+uint32 image_count
+---
+bool success
+string message
+uint32 captured_images
+string output_dir
+string rgb_path
+string session_metadata_path
+---
+string phase
+uint32 captured_images
+uint32 target_images

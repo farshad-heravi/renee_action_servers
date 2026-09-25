@@ -218,6 +218,20 @@ def generate_launch_description():
         ])),
     )
 
+    zed_capture_server = Node(
+        package='renee_action_servers',
+        executable='zed_ssh_capture_action_server',
+        name='zed_ssh_capture_action_server',
+        output='screen',
+        parameters=[{
+            'use_sim_time': effective_use_sim_time,
+        }],
+        condition=IfCondition(PythonExpression([
+            "'", LaunchConfiguration('real_robot'), "' == 'true' and '",
+            LaunchConfiguration('wrist_camera'), "' == 'stereolabs_zed2i'",
+        ])),
+    )
+
     wrist_camera_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(
@@ -279,6 +293,7 @@ def generate_launch_description():
             wrist_camera_launch,
             capture_rgbd_server,
             camera_placement_server,
+            zed_capture_server,
             wait_for_action_server_move_group,
             start_arm_motion_servers_when_ready,
             # container,

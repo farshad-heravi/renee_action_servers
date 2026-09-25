@@ -47,13 +47,6 @@ of 30):
 ros2 action send_goal /capture_rgbd \
   renee_action_servers/action/CaptureRGBD \
   "{waypoint_id: station_001, session_dir: /tmp/renee_scan_session, frame_count: 5}"
-```
-
-## TODOs
-
-[] add a real robot launch
-
-
 
 To start only the real driver and MoveIt, without the application action
 servers, use the dedicated launch directly:
