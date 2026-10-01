@@ -100,6 +100,12 @@ def generate_launch_description():
             description='Camera type to use on the wrist (none = no camera)',
         ),
         DeclareLaunchArgument(
+            'end_effector',
+            default_value='pointer_tester',
+            choices=['none', 'pointer_tester'],
+            description='Tool mounted on the real arm (real_robot:=true only)',
+        ),
+        DeclareLaunchArgument(
             'is_localization_enabled',
             default_value='false',
             description='Localization publishes robot_map→robot_odom; if false, a static transform is published instead',
@@ -142,6 +148,7 @@ def generate_launch_description():
             'kinematics_params_file': LaunchConfiguration('kinematics_params_file'),
             'use_rviz': LaunchConfiguration('use_rviz'),
             'wrist_camera': LaunchConfiguration('wrist_camera'),
+            'end_effector': LaunchConfiguration('end_effector'),
         }.items(),
     )
 
