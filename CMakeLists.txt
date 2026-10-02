@@ -23,13 +23,15 @@ find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(renee_perception REQUIRED)
+find_package(ZLIB REQUIRED)
+find_package(nlohmann_json REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "action/CameraPlacement.action"
   "action/ArmMotionPlan.action"
   "action/ArmJointMotionPlan.action"
   "action/CaptureRGBD.action"
-  "action/CaptureZedImage.action"
+  "action/CaptureCameraFrames.action"
   DEPENDENCIES builtin_interfaces geometry_msgs sensor_msgs
 )
 
@@ -89,22 +91,31 @@ ament_target_dependencies(capture_rgbd_action_server
 )
 target_link_libraries(capture_rgbd_action_server "${cpp_typesupport_target}")
 
-add_executable(zed_ssh_capture_action_server
-  src/zed_ssh_capture_action_server.cpp
+add_executable(capture_camera_frames_action_server
+  src/capture_camera_frames_action_server.cpp
 )
-target_compile_features(zed_ssh_capture_action_server PUBLIC cxx_std_17)
-ament_target_dependencies(zed_ssh_capture_action_server
+target_compile_features(capture_camera_frames_action_server PUBLIC cxx_std_17)
+target_include_directories(capture_camera_frames_action_server PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+)
+ament_target_dependencies(capture_camera_frames_action_server
+  builtin_interfaces
   rclcpp
   rclcpp_action
+  sensor_msgs
 )
-target_link_libraries(zed_ssh_capture_action_server "${cpp_typesupport_target}")
+target_link_libraries(capture_camera_frames_action_server
+  "${cpp_typesupport_target}"
+  ZLIB::ZLIB
+  nlohmann_json::nlohmann_json
+)
 
 install(TARGETS
   arm_motion_plan_server
   arm_joint_motion_plan_server
   camera_placement_action_server
   capture_rgbd_action_server
-  zed_ssh_capture_action_server
+  capture_camera_frames_action_server
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -161,6 +172,14 @@ if(BUILD_TESTING)
   # a copyright and license is added to all source files
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
+
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_camera_link test/test_camera_link.cpp)
+  target_compile_features(test_camera_link PUBLIC cxx_std_17)
+  target_include_directories(test_camera_link PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  )
+  target_link_libraries(test_camera_link ZLIB::ZLIB nlohmann_json::nlohmann_json)
 endif()
 
 ament_package()

@@ -1,0 +1,19 @@
+capture_camera_frames_action_server:
+  ros__parameters:
+    # Camera service on the Jetson, reached through an SSH tunnel to 127.0.0.1
+    # or directly at 192.168.1.60 if the main board routes to it.
+    link_host: 127.0.0.1
+    link_port: 7788
+    connect_timeout_sec: 3.0
+    default_timeout_sec: 20.0
+    max_frames: 100
+    # Clock sync: best (min round trip) of ping_count pings per goal; while idle the
+    # open connection is re-pinged every resync_period_sec (0 disables).
+    ping_count: 5
+    resync_period_sec: 5.0
+    max_rtt_ms: 100.0
+    max_clock_offset_ms: 50.0
+    camera_frame: robot_arm_rgbd_camera_left_camera_optical_frame
+    # N > 1 frames are published as <topic_prefix>{rgb/image_raw,depth/image_raw,camera_info}
+    topic_prefix: "~/"
+    topic_queue_depth: 10

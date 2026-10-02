@@ -1,0 +1,32 @@
+# Capture RGB or RGB-D frames from a camera service (e.g. the ZED2i on the Jetson).
+# Nothing is saved to disk. Timestamps are converted to PC time and validated.
+#
+# mode: "rgb" or "rgbd"
+string mode
+# 0 = 1 frame. 1 frame is returned in the result; N > 1 frames are published on
+# <topic_prefix>rgb/image_raw, depth/image_raw and camera_info as they arrive.
+uint32 num_frames
+# 0 = server default
+float64 timeout_sec
+---
+bool success
+string message
+uint32 captured_frames
+# Filled only when num_frames == 1. depth is empty in rgb mode (32FC1, metres, NaN = invalid).
+sensor_msgs/Image rgb
+sensor_msgs/Image depth
+# Intrinsics of the left optical frame; depth is registered to it.
+sensor_msgs/CameraInfo camera_info
+# Capture time of the first frame, in PC time.
+builtin_interfaces/Time stamp
+# Capture time of every captured frame, in PC time.
+builtin_interfaces/Time[] stamps
+# Jetson clock minus PC clock, and the round trip of the best sync sample.
+float64 clock_offset_ms
+float64 round_trip_ms
+# True only if the link and every frame passed the timestamp checks.
+bool timestamps_valid
+---
+string phase    # connecting, syncing_clock, capturing, validating
+uint32 captured_frames
+uint32 target_frames

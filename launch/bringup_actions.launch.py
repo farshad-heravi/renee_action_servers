@@ -225,14 +225,19 @@ def generate_launch_description():
         ])),
     )
 
-    zed_capture_server = Node(
+    camera_frames_server = Node(
         package='renee_action_servers',
-        executable='zed_ssh_capture_action_server',
-        name='zed_ssh_capture_action_server',
+        executable='capture_camera_frames_action_server',
+        name='capture_camera_frames_action_server',
         output='screen',
-        parameters=[{
-            'use_sim_time': effective_use_sim_time,
-        }],
+        parameters=[
+            PathJoinSubstitution([
+                get_package_share_directory('renee_action_servers'),
+                'config',
+                'camera_frames_real.yaml',
+            ]),
+            {'use_sim_time': effective_use_sim_time},
+        ],
         condition=IfCondition(PythonExpression([
             "'", LaunchConfiguration('real_robot'), "' == 'true' and '",
             LaunchConfiguration('wrist_camera'), "' == 'stereolabs_zed2i'",
@@ -300,7 +305,7 @@ def generate_launch_description():
             wrist_camera_launch,
             capture_rgbd_server,
             camera_placement_server,
-            zed_capture_server,
+            camera_frames_server,
             wait_for_action_server_move_group,
             start_arm_motion_servers_when_ready,
             # container,
