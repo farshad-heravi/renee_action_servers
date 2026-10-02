@@ -151,7 +151,11 @@ re-measures periodically while idle. Therefore:
 
 ## 6. What the PC checks (for reference)
 
-round trip ≤ `max_rtt_ms`; `clock_ok` true (and `chrony_offset_ms` small if present);
+round trip ≤ `max_rtt_ms` (if the best of `ping_count` pings is slower, a fresh batch is
+measured up to `sync_retries` more times, default 2, before the goal is aborted with
+`Link round trip 250 ms is outside [0, 100] ms (best of 3 sync attempts)`; only the clock
+measurement is retried, never a capture or any other check); `clock_ok` true (and
+`chrony_offset_ms` small if present);
 every converted capture time ≥ goal-received time − `rtt/2` and not in the future;
 strictly increasing timestamps; contiguous `index`; `camera_info` size equals image size;
 RGB and depth sizes consistent. Any failure aborts the goal with a reason.
@@ -173,7 +177,78 @@ fault injection (`--clock-skew-s`, `--fault stale|latency|drop|clock_bad`).
 `scripts/test_capture_client.py` drives the PC action and can run the whole scenario
 list against the mock.
 
-## 9. Versioning
+## 9. Deployment notes
+
+Everything numeric here is a **single-setup measurement** (one ZED 2i, serial 37649793, SDK
+3.7.7, one Jetson Nano, one wifi session through the rover's main board and an SSH tunnel,
+2026-10-02), mostly without repeats. Treat them as orders of magnitude, not guarantees.
+"Measured" means observed on that setup; "Assumed" means reasoning that was not tested.
+
+**Camera must be on USB 3 (measured).** On USB 2.0 (`lsusb -t` shows the `uvcvideo`
+entries under `480M`) `Camera.open()` fails with `CAMERA NOT DETECTED`. Every failed open
+also resets the camera's USB, so never retry in a tight loop: the service backs off (2 s,
+doubling after 3 failures, capped at 30 s). Re-plug the cable and check `lsusb -t` shows
+`5000M`. The ROS 1 `zed_wrapper_node` (started by `jetson-ros.service` via `bringup.sh`)
+holds the camera exclusively, so that unit must stay disabled/stopped, otherwise the
+service cannot open the ZED. Anything on the robot that relied on its ROS 1 topics stops
+working while it is off.
+
+**Use the reported `camera_info`, not the factory calibration (measured).** The service
+reports the SDK's rectified left camera. At 1280x720 that is fx = fy ≈ 530.3,
+cx ≈ 614.3, cy ≈ 348.9, zero distortion (the SDK self-calibrates slightly at each open,
+e.g. 530.325 in one run). The factory calibration file has different, unrectified values
+(fx ≈ 536.6, with distortion). Hand-eye calibration (`wrist_camera_calibration`) must use
+the intrinsics from the same image it uses. Assumed, not tested: mixing the two would bias
+the result.
+
+**Timing baseline, Jetson in 5W mode (measured).**
+
+| What | Value |
+|---|---|
+| Service ready after start (open + 2 s warm-up) | ~4.5 s |
+| Goal to result, rgbd N=1 | ~1.1-1.4 s (median ~1.3 s) |
+| Goal to result, rgb N=5 / rgbd N=5 | ~1.6 s / ~3.2 s |
+| Frame spacing inside one capture | ~200 ms (rgb), ~470 ms (rgbd), see below |
+| Compressed size per frame | ~1.5 MB rgb, ~1.9 MB rgbd |
+| Round trip over the SSH tunnel | 2-5 ms; one wifi session only |
+| Jetson clock vs PC | ~2.25 s ahead, steady to ~1 ms per goal; handled by the per-goal offset |
+| Idle service CPU | ~17% of one core |
+| Jetson temperature under capture | 57-62 °C |
+
+Frames inside a capture are distinct but not consecutive camera frames (the camera runs at
+15 fps, 67 ms): grabbing, compressing and sending run serially, so spacing is dominated by
+encoding. Grabbing all N first and encoding afterwards would tighten it at the cost of
+memory (not done). In a later end-to-end run with the Jetson in MAXN mode, cycles took
+~1.1 s (single observation).
+
+**`pyzed` `grab()` holds the GIL (measured).** A continuously running idle grab loop
+starved the socket and zlib threads of the service: ping round trip median ~100 ms instead
+of ~5 ms, and rgbd N=5 took 9.1 s instead of 3.2 s. The service now grabs every 0.2 s
+while idle (`--idle-period`) and pauses idle grabs during a capture. The grab during a
+capture still holds the GIL; moving the camera loop into its own process would remove it
+(not done).
+
+**Full-size images are lost to best-effort DDS subscribers (measured, cause assessed).**
+A 1280x720 image is 2.7 MB. A best-effort subscriber (the `rqt_image_view` default)
+received 1 of 7 RGB images and no depth over loopback, while reliable subscribers got
+everything. Cyclone logs `failed to increase socket receive buffer size`, and
+`net.core.rmem_max` is ~1 MB. The server's topics are reliable. For viewing use reliable
+QoS or the 640x360 `/camera_frame/*/preview` topics of `scripts/camera_frame_publisher.py`.
+A real fix is a larger host `net.core.rmem_max` plus
+`<Internal><SocketReceiveBufferSize min="10MB"/></Internal>` in `CYCLONEDDS_URI`. Both are
+global to the host and every service, so neither is applied.
+
+**One client at a time (measured).** The service keeps the newest connection; a second
+client closes the first and aborts a capture in progress ("camera service closed the
+connection"). The next goal on the surviving connection succeeds.
+
+**Watch the power in MAXN mode (observed, cause unknown).** With the Jetson in MAXN mode
+`dmesg` showed ~1000 `soctherm: OC ALARM` lines, still growing about once per second, and
+the first camera open once failed with `LOW USB BANDWIDTH` before a retry succeeded. They may
+not be related and the service ran fine. If the camera drops or the board resets, go back to
+5W (`sudo nvpmodel -m 1`) and check the supply.
+
+## 10. Versioning
 
 `version` is 1. Adding optional fields keeps version 1; changing framing, units or
 required fields bumps it. Unknown extra fields must be ignored by both sides.

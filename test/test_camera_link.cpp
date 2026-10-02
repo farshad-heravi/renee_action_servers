@@ -8,8 +8,12 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cmath>
+#include <functional>
+#include <stdexcept>
 #include <thread>
+#include <vector>
 
 #include "renee_action_servers/camera_link.hpp"
 #include "renee_action_servers/clock_sync.hpp"
@@ -110,6 +114,96 @@ TEST(ClockSync, BestSampleIsSmallestRoundTrip)
   samples[2].rtt_ns = 12 * kMs;
   EXPECT_EQ(csync::bestSampleIndex(samples), 1u);
   EXPECT_THROW(csync::bestSampleIndex({}), std::invalid_argument);
+}
+
+namespace
+{
+  struct Batch
+  {
+    csync::ClockSample sample;
+    int id{0};
+  };
+
+  // Returns one batch per call with the given round trips (ms); counts the calls.
+  struct FakeBatches
+  {
+    std::vector<double> rtts_ms;
+    int calls{0};
+    Batch operator()()
+    {
+      Batch batch;
+      batch.id = ++calls;
+      const double rtt = rtts_ms.at(std::min<std::size_t>(calls - 1, rtts_ms.size() - 1));
+      batch.sample.rtt_ns = static_cast<std::int64_t>(rtt * 1.0e6);
+      return batch;
+    }
+  };
+}  // namespace
+
+TEST(ClockSync, NoRetryWhenFirstBatchIsFine)
+{
+  FakeBatches batches{{20.0, 5.0}};
+  const auto outcome = csync::syncWithRetries<Batch>(std::ref(batches), 100.0, 2);
+  EXPECT_EQ(batches.calls, 1);
+  EXPECT_EQ(outcome.attempts, 1);
+  EXPECT_EQ(outcome.result.id, 1);
+  EXPECT_DOUBLE_EQ(outcome.best_rtt_ms, 20.0);
+  EXPECT_TRUE(outcome.failure.empty());
+}
+
+TEST(ClockSync, SucceedsOnSecondBatchAfterSlowFirst)
+{
+  FakeBatches batches{{300.0, 20.0, 5.0}};
+  const auto outcome = csync::syncWithRetries<Batch>(std::ref(batches), 100.0, 2);
+  EXPECT_EQ(batches.calls, 2);  // stops at the first good batch
+  EXPECT_EQ(outcome.attempts, 2);
+  EXPECT_EQ(outcome.result.id, 2);
+  EXPECT_DOUBLE_EQ(outcome.best_rtt_ms, 20.0);
+  EXPECT_TRUE(outcome.failure.empty());
+}
+
+TEST(ClockSync, AbortsAfterRetriesWithBestRoundTripInMessage)
+{
+  FakeBatches batches{{300.0, 250.0, 400.0, 5.0}};
+  const auto outcome = csync::syncWithRetries<Batch>(std::ref(batches), 100.0, 2);
+  EXPECT_EQ(batches.calls, 3);  // 1 + 2 retries, the 4th (good) batch is never taken
+  EXPECT_EQ(outcome.attempts, 3);
+  EXPECT_EQ(outcome.result.id, 2);  // the batch with the smallest round trip is kept
+  EXPECT_DOUBLE_EQ(outcome.best_rtt_ms, 250.0);
+  EXPECT_EQ(
+    outcome.failure,
+    "Link round trip 250 ms is outside [0, 100] ms (best of 3 sync attempts)");
+}
+
+TEST(ClockSync, ZeroRetriesMeansOneAttempt)
+{
+  FakeBatches batches{{300.0, 5.0}};
+  const auto outcome = csync::syncWithRetries<Batch>(std::ref(batches), 100.0, 0);
+  EXPECT_EQ(batches.calls, 1);
+  EXPECT_EQ(
+    outcome.failure,
+    "Link round trip 300 ms is outside [0, 100] ms (best of 1 sync attempt)");
+  FakeBatches negative_retries{{300.0, 5.0}};
+  EXPECT_EQ(csync::syncWithRetries<Batch>(std::ref(negative_retries), 100.0, -3).attempts, 1);
+}
+
+TEST(ClockSync, NegativeRoundTripCountsAsSlowAndIsRetried)
+{
+  FakeBatches batches{{-2.0, 10.0}};  // clock stepped backwards during the exchange
+  const auto outcome = csync::syncWithRetries<Batch>(std::ref(batches), 100.0, 2);
+  EXPECT_EQ(outcome.attempts, 2);
+  EXPECT_TRUE(outcome.failure.empty());
+}
+
+TEST(ClockSync, MeasurementErrorsAreNotRetried)
+{
+  int calls = 0;
+  const auto throwing = [&calls]() -> Batch {
+      ++calls;
+      throw std::runtime_error("link lost");
+    };
+  EXPECT_THROW(csync::syncWithRetries<Batch>(throwing, 100.0, 2), std::runtime_error);
+  EXPECT_EQ(calls, 1);
 }
 
 TEST(ClockSync, ValidateLink)

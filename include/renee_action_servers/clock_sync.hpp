@@ -14,6 +14,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace renee_action_servers
@@ -50,6 +51,45 @@ namespace renee_action_servers
         samples.begin(), std::min_element(
           samples.begin(), samples.end(),
           [](const ClockSample & a, const ClockSample & b) {return a.rtt_ns < b.rtt_ns;})));
+    }
+
+    /** Outcome of measuring the clock with retries. result is the batch kept (the first
+     *  one whose round trip is within limits, else the one with the smallest round trip). */
+    template<typename ResultT>
+    struct RetryOutcome
+    {
+      ResultT result{};
+      int attempts{0};
+      double best_rtt_ms{0.0};
+      std::string failure;  // empty if the round trip is within limits
+    };
+
+    /** Calls measure_batch (one batch of pings, returning something with a .sample
+     *  ClockSample) up to 1 + retries times, stopping at the first batch whose round trip
+     *  is within [0, max_rtt_ms]. Only a slow link is retried: exceptions from
+     *  measure_batch propagate and are never retried here. */
+    template<typename ResultT, typename MeasureFn>
+    RetryOutcome<ResultT> syncWithRetries(MeasureFn measure_batch, double max_rtt_ms, int retries)
+    {
+      RetryOutcome<ResultT> outcome;
+      const int max_attempts = std::max(0, retries) + 1;
+      for (int attempt = 1; attempt <= max_attempts; ++attempt) {
+        ResultT batch = measure_batch();
+        const double rtt_ms = static_cast<double>(batch.sample.rtt_ns) / 1.0e6;
+        const bool within = rtt_ms >= 0.0 && rtt_ms <= max_rtt_ms;
+        outcome.attempts = attempt;
+        if (within || attempt == 1 || std::abs(rtt_ms) < std::abs(outcome.best_rtt_ms)) {
+          outcome.result = std::move(batch);
+          outcome.best_rtt_ms = rtt_ms;
+        }
+        if (within) {return outcome;}
+      }
+      std::ostringstream out;
+      out << "Link round trip " << outcome.best_rtt_ms << " ms is outside [0, " << max_rtt_ms
+          << "] ms (best of " << outcome.attempts << " sync attempt"
+          << (outcome.attempts == 1 ? "" : "s") << ")";
+      outcome.failure = out.str();
+      return outcome;
     }
 
     /** Converts a Jetson-clock time to PC time. */

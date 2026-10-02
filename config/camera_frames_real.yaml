@@ -8,8 +8,11 @@ capture_camera_frames_action_server:
     default_timeout_sec: 20.0
     max_frames: 100
     # Clock sync: best (min round trip) of ping_count pings per goal; while idle the
-    # open connection is re-pinged every resync_period_sec (0 disables).
+    # open connection is re-pinged every resync_period_sec (0 disables). If the best
+    # round trip still exceeds max_rtt_ms, a fresh batch is measured up to sync_retries
+    # more times before the goal is aborted (the capture itself is never retried).
     ping_count: 5
+    sync_retries: 2
     resync_period_sec: 5.0
     max_rtt_ms: 100.0
     max_clock_offset_ms: 50.0

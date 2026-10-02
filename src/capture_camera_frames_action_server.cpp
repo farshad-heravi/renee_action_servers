@@ -60,6 +60,7 @@ namespace
     bool clock_ok{false};
     std::optional<double> chrony_offset_ms;
   };
+  using SyncOutcome = csync::RetryOutcome<SyncResult>;
 }  // namespace
 
 /**
@@ -82,6 +83,7 @@ class CaptureCameraFramesActionServer : public rclcpp::Node
       default_timeout_sec_ = declare_parameter<double>("default_timeout_sec", 20.0);
       max_frames_ = declare_parameter<int>("max_frames", 100);
       ping_count_ = declare_parameter<int>("ping_count", 5);
+      sync_retries_ = declare_parameter<int>("sync_retries", 2);
       resync_period_sec_ = declare_parameter<double>("resync_period_sec", 5.0);
       limits_.max_rtt_ms = declare_parameter<double>("max_rtt_ms", 100.0);
       limits_.max_clock_offset_ms = declare_parameter<double>("max_clock_offset_ms", 50.0);
@@ -186,19 +188,28 @@ class CaptureCameraFramesActionServer : public rclcpp::Node
       return results[csync::bestSampleIndex(samples)];
     }
 
+    // A slow batch (best round trip above max_rtt_ms) is measured again, up to
+    // sync_retries_ more times, before the link is declared too slow. Only the clock
+    // measurement is repeated, never a capture. Caller holds link_mutex_.
+    SyncOutcome syncWithRetry(const clink::CameraLink::CancelFn & cancel)
+    {
+      return csync::syncWithRetries<SyncResult>(
+        [this, &cancel]() {return syncClock(cancel);}, limits_.max_rtt_ms, sync_retries_);
+    }
+
     // A connection left open from an earlier goal may have gone stale; retry once
     // on a fresh connection before reporting the Jetson as unreachable.
-    SyncResult connectAndSync(const clink::CameraLink::CancelFn & cancel)
+    SyncOutcome connectAndSync(const clink::CameraLink::CancelFn & cancel)
     {
       try {
         ensureConnected();
-        return syncClock(cancel);
+        return syncWithRetry(cancel);
       } catch (const clink::LinkCancelled &) {
         throw;
       } catch (const clink::LinkError &) {
         link_.close();
         ensureConnected();
-        return syncClock(cancel);
+        return syncWithRetry(cancel);
       }
     }
 
@@ -317,10 +328,12 @@ class CaptureCameraFramesActionServer : public rclcpp::Node
 
           publishFeedback(goal_handle, "connecting", 0, target);
           publishFeedback(goal_handle, "syncing_clock", 0, target);
-          const SyncResult synced = connectAndSync(cancel);
+          const SyncOutcome outcome = connectAndSync(cancel);
+          const SyncResult & synced = outcome.result;
           const csync::ClockSample & sample = synced.sample;
           result->clock_offset_ms = static_cast<double>(sample.offset_ns) / 1.0e6;
           result->round_trip_ms = static_cast<double>(sample.rtt_ns) / 1.0e6;
+          if (!outcome.failure.empty()) {throw clink::LinkError(outcome.failure);}
           const std::string link_problem = csync::validateLink(
             sample, synced.clock_ok, synced.chrony_offset_ms, limits_);
           if (!link_problem.empty()) {throw clink::LinkError(link_problem);}
@@ -412,7 +425,7 @@ class CaptureCameraFramesActionServer : public rclcpp::Node
     }
 
     std::string link_host_, camera_frame_;
-    int link_port_{7788}, max_frames_{100}, ping_count_{5};
+    int link_port_{7788}, max_frames_{100}, ping_count_{5}, sync_retries_{2};
     double connect_timeout_sec_{3.0}, default_timeout_sec_{20.0}, resync_period_sec_{5.0};
     csync::LinkLimits limits_;
 
