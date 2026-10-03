@@ -18,7 +18,8 @@ find_package(moveit_ros_planning_interface REQUIRED)
 find_package(moveit_msgs REQUIRED)
 find_package(nav2_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
-find_package(realsense2_camera_msgs REQUIRED)
+# Optional: only the RealSense RGB-D capture server needs it (skipped with a warning when absent).
+find_package(realsense2_camera_msgs QUIET)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
@@ -73,23 +74,28 @@ ament_target_dependencies(camera_placement_action_server
 )
 target_link_libraries(camera_placement_action_server "${cpp_typesupport_target}")
 
-add_executable(capture_rgbd_action_server
-  src/capture_rgbd_action_server.cpp
-)
-target_compile_features(capture_rgbd_action_server PUBLIC cxx_std_17)
-ament_target_dependencies(capture_rgbd_action_server
-  builtin_interfaces
-  geometry_msgs
-  rclcpp
-  rclcpp_action
-  renee_perception
-  realsense2_camera_msgs
-  nav_msgs
-  sensor_msgs
-  tf2
-  tf2_ros
-)
-target_link_libraries(capture_rgbd_action_server "${cpp_typesupport_target}")
+if(realsense2_camera_msgs_FOUND)
+  add_executable(capture_rgbd_action_server
+    src/capture_rgbd_action_server.cpp
+  )
+  target_compile_features(capture_rgbd_action_server PUBLIC cxx_std_17)
+  ament_target_dependencies(capture_rgbd_action_server
+    builtin_interfaces
+    geometry_msgs
+    rclcpp
+    rclcpp_action
+    renee_perception
+    realsense2_camera_msgs
+    nav_msgs
+    sensor_msgs
+    tf2
+    tf2_ros
+  )
+  target_link_libraries(capture_rgbd_action_server "${cpp_typesupport_target}")
+  install(TARGETS capture_rgbd_action_server DESTINATION lib/${PROJECT_NAME})
+else()
+  message(WARNING "realsense2_camera_msgs not found: capture_rgbd_action_server is not built")
+endif()
 
 add_executable(capture_camera_frames_action_server
   src/capture_camera_frames_action_server.cpp
@@ -114,7 +120,6 @@ install(TARGETS
   arm_motion_plan_server
   arm_joint_motion_plan_server
   camera_placement_action_server
-  capture_rgbd_action_server
   capture_camera_frames_action_server
   DESTINATION lib/${PROJECT_NAME}
 )
