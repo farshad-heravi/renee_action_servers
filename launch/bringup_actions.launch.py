@@ -79,11 +79,6 @@ def generate_launch_description():
             description='Start the /camera_placement planner action server',
         ),
         DeclareLaunchArgument(
-            'start_capture_rgbd',
-            default_value='false',
-            description='Start the /capture_rgbd action server',
-        ),
-        DeclareLaunchArgument(
             'use_camera_rviz',
             default_value='false',
             choices=['true', 'false'],
@@ -194,37 +189,6 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('start_camera_placement')),
     )
 
-    capture_rgbd_server = Node(
-        package='renee_action_servers',
-        executable='capture_rgbd_action_server',
-        name='capture_rgbd_action_server',
-        output='screen',
-        parameters=[
-            PathJoinSubstitution([
-                get_package_share_directory('renee_action_servers'),
-                'config',
-                PythonExpression([
-                    "'rgbd_capture_real.yaml' if '", LaunchConfiguration('real_robot'),
-                    "' == 'true' else 'rgbd_capture_sim.yaml'",
-                ]),
-            ]),
-            {
-                'use_sim_time': effective_use_sim_time,
-                'camera_model': LaunchConfiguration('wrist_camera'),
-                'camera_frame': PythonExpression([
-                    "'robot_arm_rgbd_camera_left_camera_optical_frame' if '",
-                    LaunchConfiguration('wrist_camera'),
-                    "' == 'stereolabs_zed2i' else "
-                    "'robot_arm_rgbd_camera_color_optical_frame'",
-                ]),
-            },
-        ],
-        condition=IfCondition(PythonExpression([
-            "'", LaunchConfiguration('start_capture_rgbd'), "' == 'true' and '",
-            LaunchConfiguration('wrist_camera'), "' != 'none'",
-        ])),
-    )
-
     camera_frames_server = Node(
         package='renee_action_servers',
         executable='capture_camera_frames_action_server',
@@ -303,7 +267,6 @@ def generate_launch_description():
             start_moveit_sim,
             start_moveit_real,
             wrist_camera_launch,
-            capture_rgbd_server,
             camera_placement_server,
             camera_frames_server,
             wait_for_action_server_move_group,

@@ -12,8 +12,7 @@ Simulation:
 
 ```bash
 ros2 launch renee_action_servers bringup_actions.launch.py \
-  wrist_camera:=realsense_d435i \
-  start_capture_rgbd:=true \
+  wrist_camera:=stereolabs_zed2i \
   sim_depth_width:=848 sim_depth_height:=480 sim_depth_rate:=30
 ```
 
@@ -26,9 +25,7 @@ ros2 launch renee_action_servers bringup_actions.launch.py \
   reverse_ip:=192.168.1.20 \
   kinematics_params_file:=/absolute/path/ur5e_calibration.yaml \
   is_localization_enabled:=true \
-  wrist_camera:=realsense_d435i \
-  start_capture_rgbd:=true \
-  realsense_depth_profile:=848x480x30 \
+  wrist_camera:=stereolabs_zed2i \
   use_rviz:=true
 ```
 
@@ -38,15 +35,15 @@ Real mode always disables simulation time, starts
 
 - `/moveit_arm_motion_plan`
 - `/moveit_arm_joint_motion_plan`
-- `/capture_rgbd`
+- `/capture_camera_frames` (real robot with `wrist_camera:=stereolabs_zed2i`: frames from the ZED on the Jetson)
 
-Capture a five-frame station (use `frame_count: 0` for the configured default
-of 30):
+Capture five RGB-D frames from the ZED (see `docs/camera_link_protocol.md`):
 
 ```bash
-ros2 action send_goal /capture_rgbd \
-  renee_action_servers/action/CaptureRGBD \
-  "{waypoint_id: station_001, session_dir: /tmp/renee_scan_session, frame_count: 5}"
+ros2 action send_goal /capture_camera_frames \
+  renee_action_servers/action/CaptureCameraFrames \
+  "{mode: rgbd, num_frames: 5}"
+```
 
 To start only the real driver and MoveIt, without the application action
 servers, use the dedicated launch directly:
