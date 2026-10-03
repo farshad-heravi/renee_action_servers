@@ -65,7 +65,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'kinematics_params_file',
-            default_value='/fnh_pkgs/ur5e_calibration.yaml',
+            default_value='/renee/ur5e_calibration.yaml',
             description='Absolute path to the extracted UR5e calibration YAML',
         ),
         DeclareLaunchArgument(
