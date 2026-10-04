@@ -67,7 +67,7 @@ collision-free MoveIt IK and a Nav2 path, and returns the best base pose and
 arm joint solution. Nothing moves; the result is then executed with Nav2 and
 `/moveit_arm_joint_motion_plan`.
 
-Needs `bridge-real`, `localize_real` and `navigation-real` running (Nav2's
+Needs `bridge-real`, `localize-real` and `navigate-real` running (Nav2's
 `/robot/compute_path_to_pose`), then:
 
 ```bash
