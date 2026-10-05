@@ -30,6 +30,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "action/ArmMotionPlan.action"
   "action/ArmJointMotionPlan.action"
   "action/CaptureCameraFrames.action"
+  "action/DetectScrew.action"
   DEPENDENCIES builtin_interfaces geometry_msgs sensor_msgs
 )
 
@@ -90,7 +91,21 @@ target_link_libraries(capture_camera_frames_action_server
   nlohmann_json::nlohmann_json
 )
 
+add_executable(screw_pose_action_server src/screw_pose_action_server.cpp)
+target_compile_features(screw_pose_action_server PUBLIC cxx_std_17)
+ament_target_dependencies(screw_pose_action_server
+  rclcpp
+  rclcpp_action
+  geometry_msgs
+  std_msgs
+)
+target_link_libraries(screw_pose_action_server
+  "${cpp_typesupport_target}"
+  nlohmann_json::nlohmann_json
+)
+
 install(TARGETS
+  screw_pose_action_server
   arm_motion_plan_server
   arm_joint_motion_plan_server
   camera_placement_action_server

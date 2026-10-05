@@ -84,6 +84,11 @@ def generate_launch_description():
             choices=['true', 'false'],
             description='Open the dedicated RGB/depth RealSense RViz preview',
         ),
+        DeclareLaunchArgument(
+            'start_screw_pose',
+            default_value='false',
+            description='Start the /detect_screw action server (needs the vision module screw_pose node running)',
+        ),
         DeclareLaunchArgument('realsense_serial_no', default_value="''"),
         DeclareLaunchArgument('realsense_depth_profile', default_value='848x480x30'),
         DeclareLaunchArgument('realsense_color_profile', default_value='848x480x30'),
@@ -208,6 +213,22 @@ def generate_launch_description():
         ])),
     )
 
+    screw_pose_server = Node(
+        package='renee_action_servers',
+        executable='screw_pose_action_server',
+        name='screw_pose_action_server',
+        output='screen',
+        parameters=[
+            PathJoinSubstitution([
+                get_package_share_directory('renee_action_servers'),
+                'config',
+                'screw_pose_action.yaml',
+            ]),
+            {'use_sim_time': effective_use_sim_time},
+        ],
+        condition=IfCondition(LaunchConfiguration('start_screw_pose')),
+    )
+
     wrist_camera_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(
@@ -269,6 +290,7 @@ def generate_launch_description():
             wrist_camera_launch,
             camera_placement_server,
             camera_frames_server,
+            screw_pose_server,
             wait_for_action_server_move_group,
             start_arm_motion_servers_when_ready,
             # container,

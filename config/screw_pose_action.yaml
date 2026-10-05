@@ -1,0 +1,10 @@
+screw_pose_action_server:
+  ros__parameters:
+    # Published by the screw_pose_ros2 node (renee_vision_modules)
+    metadata_topic: /screw_pose/metadata_json
+    # Defaults used when the goal leaves the field at 0
+    default_num_samples: 5
+    default_timeout_sec: 10.0
+    default_min_confidence: 0.3
+    # Averaging is only accepted when the sampled positions agree within this RMS deviation
+    max_position_std_m: 0.005

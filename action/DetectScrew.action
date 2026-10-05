@@ -1,0 +1,30 @@
+# Locate a screw with the vision module (screw_pose_ros2 node, run from renee_vision_modules)
+# and return its pose averaged over num_samples fresh camera frames.
+# The vision node must run with a non-empty target_frame: poses are returned in that frame.
+#
+# "M4", "M5", "M6"; empty = any class
+string target_class
+# ByteTrack id of one specific screw; -1 = any (the most confident one wins)
+int32 target_track_id -1
+# Frames to average; 0 = server default
+uint32 num_samples
+# Detections below this confidence are ignored; 0 = server default
+float64 min_confidence
+# 0 = server default
+float64 timeout_sec
+---
+bool success
+string message
+# Averaged screw pose, in the vision node's target_frame (robot_arm_base on the real robot).
+geometry_msgs/PoseStamped pose
+string class_name
+int32 track_id
+# Mean detection confidence over the averaged frames.
+float64 confidence
+uint32 num_samples
+# RMS deviation of the sampled positions from their mean, in metres.
+float64 position_std_m
+---
+string phase    # waiting_for_detections, collecting
+uint32 collected_samples
+uint32 target_samples
