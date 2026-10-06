@@ -51,22 +51,29 @@ def generate_launch_description():
             'real_robot',
             default_value='false',
             choices=['true', 'false'],
-            description='Connect MoveIt to the real UR5e instead of Gazebo',
+            description='Connect MoveIt to the real UR arm (ur_type) instead of Gazebo',
+        ),
+        # Declared before kinematics_params_file, whose default is built from it.
+        DeclareLaunchArgument(
+            'ur_type',
+            default_value='ur5e',
+            choices=['ur5e', 'ur15'],
+            description='UR arm model; in sim it must match the Gazebo spawn, in real the connected arm',
         ),
         DeclareLaunchArgument(
             'robot_ip',
             default_value='192.168.0.101',
-            description='IP address of the UR5e (required in real mode)',
+            description='IP address of the UR arm (required in real mode)',
         ),
         DeclareLaunchArgument(
             'reverse_ip',
             default_value='192.168.0.150',
-            description='IP address of this PC as reached by the UR5e',
+            description='IP address of this PC as reached by the UR arm',
         ),
         DeclareLaunchArgument(
             'kinematics_params_file',
-            default_value='/renee/ur5e_calibration.yaml',
-            description='Absolute path to the extracted UR5e calibration YAML',
+            default_value=['/renee/', LaunchConfiguration('ur_type'), '_calibration.yaml'],
+            description='Absolute path to the extracted calibration YAML of the UR arm',
         ),
         DeclareLaunchArgument(
             'use_rviz',
@@ -110,7 +117,6 @@ def generate_launch_description():
             default_value='false',
             description='Localization publishes robot_map→robot_odom; if false, a static transform is published instead',
         ),
-        
     ]
 
     # start moveit (move_group is delayed ~8s inside start_moveit.launch.py)
@@ -131,6 +137,7 @@ def generate_launch_description():
             'use_rviz': LaunchConfiguration('use_rviz'),
             'wrist_camera': LaunchConfiguration('wrist_camera'),
             'is_localization_enabled': LaunchConfiguration('is_localization_enabled'),
+            'ur_type': LaunchConfiguration('ur_type'),
         }.items(),
     )
     start_moveit_real = IncludeLaunchDescription(
@@ -149,6 +156,7 @@ def generate_launch_description():
             'use_rviz': LaunchConfiguration('use_rviz'),
             'wrist_camera': LaunchConfiguration('wrist_camera'),
             'end_effector': LaunchConfiguration('end_effector'),
+            'ur_type': LaunchConfiguration('ur_type'),
         }.items(),
     )
 
