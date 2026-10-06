@@ -6,6 +6,7 @@
 #include <geometry_msgs/msg/transform.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <moveit_msgs/msg/move_it_error_codes.hpp>
+#include <moveit_msgs/msg/robot_state.hpp>
 #include <moveit_msgs/srv/get_position_ik.hpp>
 #include <moveit_msgs/srv/get_state_validity.hpp>
 #include <nav2_msgs/action/compute_path_to_pose.hpp>
@@ -35,6 +36,9 @@
 #include <functional>
 #include <future>
 #include <memory>
+#include <mutex>
+#include <optional>
+#include <random>
 #include <string>
 #include <thread>
 
@@ -122,6 +126,7 @@ private:
     std::uint32_t collision_disabled_ik_failures{0};
     std::uint32_t collision_rejections{0};
     std::uint32_t valid_collision_disabled_solutions{0};
+    std::uint32_t joint_path_rejections{0};
     std::map<std::int32_t, std::uint32_t> collision_aware_error_codes;
     std::map<std::int32_t, std::uint32_t> collision_disabled_error_codes;
     std::set<std::string> collision_pairs;
@@ -142,11 +147,27 @@ private:
   geometry_msgs::msg::PoseStamped currentBasePose() const;
   std::vector<geometry_msgs::msg::PoseStamped> generateBaseCandidates(
     const PlanningRequest & request) const;
+  std::vector<double> currentArmJoints() const;
+  moveit_msgs::msg::RobotState baseRobotState(
+    const geometry_msgs::msg::PoseStamped & base_pose) const;
   bool evaluateWithMoveIt(
     const geometry_msgs::msg::PoseStamped & base_pose,
     const geometry_msgs::msg::PoseStamped & tool0_pose,
+    const std::optional<std::vector<double>> & ptp_start,
     CandidateSolution & candidate,
     MoveItDiagnostics & diagnostics,
+    const CancelCallback & cancelled);
+  bool solveIk(
+    const geometry_msgs::msg::PoseStamped & base_pose,
+    const geometry_msgs::msg::PoseStamped & tool0_pose,
+    const std::optional<std::vector<double>> & seed,
+    CandidateSolution & candidate,
+    MoveItDiagnostics & diagnostics,
+    const CancelCallback & cancelled);
+  bool isJointPathValid(
+    const geometry_msgs::msg::PoseStamped & base_pose,
+    const std::vector<double> & start,
+    const std::vector<double> & goal,
     const CancelCallback & cancelled);
   bool evaluateWithNav2(
     CandidateSolution & candidate,
@@ -163,6 +184,10 @@ private:
   rclcpp::Client<moveit_msgs::srv::GetPositionIK>::SharedPtr ik_client_;
   rclcpp::Client<moveit_msgs::srv::GetStateValidity>::SharedPtr validity_client_;
   rclcpp_action::Client<nav2_msgs::action::ComputePathToPose>::SharedPtr navigation_client_;
+  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
+  mutable std::mutex joint_state_mutex_;
+  sensor_msgs::msg::JointState latest_joint_state_;
+  std::mt19937 rng_{std::random_device{}()};
 
   std::string global_frame_;
   std::string base_frame_;
@@ -180,6 +205,8 @@ private:
   double service_timeout_sec_;
   double ik_timeout_sec_;
   bool diagnose_ik_failures_;
+  int ik_attempts_;
+  double joint_path_resolution_;
 };
 
 
@@ -265,6 +292,10 @@ CameraPlacementPlanner::CameraPlacementPlanner(
     "camera_placement.ik_timeout_sec", 0.15);
   diagnose_ik_failures_ = node_.declare_parameter<bool>(
     "camera_placement.diagnose_ik_failures", false);
+  ik_attempts_ = std::max(
+    1, static_cast<int>(node_.declare_parameter<int>("camera_placement.ik_attempts", 8)));
+  joint_path_resolution_ = node_.declare_parameter<double>(
+    "camera_placement.joint_path_resolution", 0.05);
 
   const auto ik_service = node_.declare_parameter<std::string>(
     "camera_placement.ik_service", "/robot/compute_ik");
@@ -272,11 +303,19 @@ CameraPlacementPlanner::CameraPlacementPlanner(
     "camera_placement.validity_service", "/robot/check_state_validity");
   const auto navigation_action = node_.declare_parameter<std::string>(
     "camera_placement.navigation_action", "/robot/compute_path_to_pose");
+  const auto joint_states_topic = node_.declare_parameter<std::string>(
+    "camera_placement.joint_states_topic", "/robot/joint_states");
 
   ik_client_ = node_.create_client<moveit_msgs::srv::GetPositionIK>(ik_service);
   validity_client_ = node_.create_client<moveit_msgs::srv::GetStateValidity>(validity_service);
   navigation_client_ = rclcpp_action::create_client<nav2_msgs::action::ComputePathToPose>(
     &node_, navigation_action);
+  joint_state_sub_ = node_.create_subscription<sensor_msgs::msg::JointState>(
+    joint_states_topic, rclcpp::SensorDataQoS(),
+    [this](const sensor_msgs::msg::JointState::SharedPtr message) {
+      std::lock_guard<std::mutex> lock(joint_state_mutex_);
+      latest_joint_state_ = *message;
+    });
 }
 
 std::string CameraPlacementPlanner::resolveCameraLink(
@@ -317,6 +356,14 @@ PlanningSolution CameraPlacementPlanner::plan(
       std::vector<geometry_msgs::msg::PoseStamped>{currentBasePose()} :
       generateBaseCandidates(request);
 
+    // With a locked base the returned joints are executed directly with a
+    // joint-space PTP motion, so the straight joint path from the current arm
+    // state must also be collision-free, not just the final state.
+    std::optional<std::vector<double>> ptp_start;
+    if (request.lock_current_base) {
+      ptp_start = currentArmJoints();
+    }
+
     std::vector<CandidateSolution> arm_candidates;
     MoveItDiagnostics moveit_diagnostics;
     std::uint32_t evaluated = 0;
@@ -329,7 +376,8 @@ PlanningSolution CameraPlacementPlanner::plan(
       CandidateSolution candidate;
       candidate.base_pose = base_pose;
       if (evaluateWithMoveIt(
-          base_pose, result.end_effector_pose, candidate, moveit_diagnostics, cancelled))
+          base_pose, result.end_effector_pose, ptp_start, candidate, moveit_diagnostics,
+          cancelled))
       {
         arm_candidates.push_back(std::move(candidate));
       }
@@ -342,6 +390,11 @@ PlanningSolution CameraPlacementPlanner::plan(
     if (arm_candidates.empty()) {
       std::ostringstream message;
       message << "MoveIt found no collision-free IK solution for any base candidate";
+      if (moveit_diagnostics.joint_path_rejections > 0) {
+        message << " (" << moveit_diagnostics.joint_path_rejections
+                << " IK solution(s) rejected because the PTP joint path from the "
+                   "current arm state collides)";
+      }
       if (diagnose_ik_failures_) {
         message << ". Diagnostics: collision-disabled IK succeeded for "
                 << moveit_diagnostics.collision_disabled_ik_successes
@@ -542,28 +595,33 @@ CameraPlacementPlanner::generateBaseCandidates(const PlanningRequest & request) 
   return candidates;
 }
 
-bool CameraPlacementPlanner::evaluateWithMoveIt(
-  const geometry_msgs::msg::PoseStamped & base_pose,
-  const geometry_msgs::msg::PoseStamped & tool0_pose,
-  CandidateSolution & candidate,
-  MoveItDiagnostics & diagnostics,
-  const CancelCallback & cancelled)
+std::vector<double> CameraPlacementPlanner::currentArmJoints() const
 {
-  using namespace std::chrono_literals;
-  if (!ik_client_->wait_for_service(std::chrono::duration<double>(service_timeout_sec_)) ||
-    !validity_client_->wait_for_service(std::chrono::duration<double>(service_timeout_sec_)))
+  sensor_msgs::msg::JointState joint_state;
   {
-    throw std::runtime_error("MoveIt IK or state-validity service is unavailable");
+    std::lock_guard<std::mutex> lock(joint_state_mutex_);
+    joint_state = latest_joint_state_;
   }
 
-  auto request = std::make_shared<moveit_msgs::srv::GetPositionIK::Request>();
-  request->ik_request.group_name = planning_group_;
-  request->ik_request.ik_link_name = tool0_link_;
-  request->ik_request.pose_stamped = tool0_pose;
-  request->ik_request.avoid_collisions = true;
-  request->ik_request.timeout = rclcpp::Duration::from_seconds(ik_timeout_sec_);
-  request->ik_request.robot_state.is_diff = true;
-  auto & multi_dof = request->ik_request.robot_state.multi_dof_joint_state;
+  std::vector<double> positions;
+  for (const auto & joint_name : arm_joint_names_) {
+    const auto found = std::find(joint_state.name.begin(), joint_state.name.end(), joint_name);
+    const auto index = static_cast<std::size_t>(std::distance(joint_state.name.begin(), found));
+    if (found == joint_state.name.end() || index >= joint_state.position.size()) {
+      throw std::runtime_error(
+              "No joint state received for arm joint '" + joint_name + "'");
+    }
+    positions.push_back(joint_state.position[index]);
+  }
+  return positions;
+}
+
+moveit_msgs::msg::RobotState CameraPlacementPlanner::baseRobotState(
+  const geometry_msgs::msg::PoseStamped & base_pose) const
+{
+  moveit_msgs::msg::RobotState state;
+  state.is_diff = true;
+  auto & multi_dof = state.multi_dof_joint_state;
   multi_dof.header.frame_id = global_frame_;
   multi_dof.header.stamp = node_.now();
   multi_dof.joint_names.push_back(virtual_joint_name_);
@@ -573,6 +631,134 @@ bool CameraPlacementPlanner::evaluateWithMoveIt(
   base_transform.translation.z = base_pose.pose.position.z;
   base_transform.rotation = base_pose.pose.orientation;
   multi_dof.transforms.push_back(base_transform);
+  return state;
+}
+
+bool CameraPlacementPlanner::evaluateWithMoveIt(
+  const geometry_msgs::msg::PoseStamped & base_pose,
+  const geometry_msgs::msg::PoseStamped & tool0_pose,
+  const std::optional<std::vector<double>> & ptp_start,
+  CandidateSolution & candidate,
+  MoveItDiagnostics & diagnostics,
+  const CancelCallback & cancelled)
+{
+  if (!ik_client_->wait_for_service(std::chrono::duration<double>(service_timeout_sec_)) ||
+    !validity_client_->wait_for_service(std::chrono::duration<double>(service_timeout_sec_)))
+  {
+    throw std::runtime_error("MoveIt IK or state-validity service is unavailable");
+  }
+
+  // Without a PTP start the first IK solution is enough. With one, the first
+  // attempt is seeded from the current arm state (nearest IK branch) and the
+  // remaining attempts use random seeds until a solution has a collision-free
+  // straight joint path from the current state.
+  const int attempts = ptp_start ? ik_attempts_ : 1;
+  std::uniform_real_distribution<double> random_joint(-kPi, kPi);
+  for (int attempt = 0; attempt < attempts; ++attempt) {
+    if (cancelled && cancelled()) {
+      return false;
+    }
+    std::optional<std::vector<double>> seed;
+    if (ptp_start) {
+      seed = *ptp_start;
+      if (attempt > 0) {
+        for (auto & position : *seed) {
+          position = random_joint(rng_);
+        }
+      }
+    }
+
+    CandidateSolution attempt_candidate;
+    attempt_candidate.base_pose = candidate.base_pose;
+    if (!solveIk(base_pose, tool0_pose, seed, attempt_candidate, diagnostics, cancelled)) {
+      continue;
+    }
+    if (!ptp_start) {
+      candidate = std::move(attempt_candidate);
+      return true;
+    }
+    if (!isJointPathValid(
+        base_pose, *ptp_start, attempt_candidate.arm_solution.position, cancelled))
+    {
+      ++diagnostics.joint_path_rejections;
+      continue;
+    }
+
+    double distance = 0.0;
+    for (std::size_t index = 0; index < ptp_start->size(); ++index) {
+      distance += std::abs(attempt_candidate.arm_solution.position[index] - (*ptp_start)[index]);
+    }
+    attempt_candidate.arm_cost = distance / static_cast<double>(ptp_start->size());
+    candidate = std::move(attempt_candidate);
+    return true;
+  }
+  return false;
+}
+
+bool CameraPlacementPlanner::isJointPathValid(
+  const geometry_msgs::msg::PoseStamped & base_pose,
+  const std::vector<double> & start,
+  const std::vector<double> & goal,
+  const CancelCallback & cancelled)
+{
+  using namespace std::chrono_literals;
+  // Pilz PTP interpolates all joints synchronously, so its geometric path is
+  // the straight line between start and goal in joint space.
+  double max_delta = 0.0;
+  for (std::size_t index = 0; index < start.size(); ++index) {
+    max_delta = std::max(max_delta, std::abs(goal[index] - start[index]));
+  }
+  const int steps = std::max(
+    1, static_cast<int>(std::ceil(max_delta / std::max(joint_path_resolution_, 1e-3))));
+
+  auto request = std::make_shared<moveit_msgs::srv::GetStateValidity::Request>();
+  request->group_name = planning_group_;
+  request->robot_state = baseRobotState(base_pose);
+  request->robot_state.joint_state.name = arm_joint_names_;
+  request->robot_state.joint_state.position.resize(start.size());
+  // The end points are already known to be valid (current state and the
+  // validated IK solution), so only the interior samples are checked.
+  for (int step = 1; step < steps; ++step) {
+    const double fraction = static_cast<double>(step) / static_cast<double>(steps);
+    for (std::size_t index = 0; index < start.size(); ++index) {
+      request->robot_state.joint_state.position[index] =
+        start[index] + fraction * (goal[index] - start[index]);
+    }
+    auto future = validity_client_->async_send_request(request);
+    const auto deadline = std::chrono::steady_clock::now() +
+      std::chrono::duration<double>(service_timeout_sec_);
+    while (future.wait_for(50ms) != std::future_status::ready) {
+      if ((cancelled && cancelled()) || std::chrono::steady_clock::now() >= deadline) {
+        return false;
+      }
+    }
+    if (!future.get()->valid) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool CameraPlacementPlanner::solveIk(
+  const geometry_msgs::msg::PoseStamped & base_pose,
+  const geometry_msgs::msg::PoseStamped & tool0_pose,
+  const std::optional<std::vector<double>> & seed,
+  CandidateSolution & candidate,
+  MoveItDiagnostics & diagnostics,
+  const CancelCallback & cancelled)
+{
+  using namespace std::chrono_literals;
+  auto request = std::make_shared<moveit_msgs::srv::GetPositionIK::Request>();
+  request->ik_request.group_name = planning_group_;
+  request->ik_request.ik_link_name = tool0_link_;
+  request->ik_request.pose_stamped = tool0_pose;
+  request->ik_request.avoid_collisions = true;
+  request->ik_request.timeout = rclcpp::Duration::from_seconds(ik_timeout_sec_);
+  request->ik_request.robot_state = baseRobotState(base_pose);
+  if (seed) {
+    request->ik_request.robot_state.joint_state.name = arm_joint_names_;
+    request->ik_request.robot_state.joint_state.position = *seed;
+  }
 
   auto ik_future = ik_client_->async_send_request(request);
   const auto deadline = std::chrono::steady_clock::now() +
