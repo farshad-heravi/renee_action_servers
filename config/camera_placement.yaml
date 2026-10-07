@@ -5,3 +5,17 @@ camera_placement_action_server:
     camera_placement.camera_link: robot_arm_rgbd_camera_left_camera_optical_frame
     camera_placement.diagnose_ik_failures: false
     camera_placement.ik_timeout_sec: 0.5
+    # Short arm motions with a locked base (<= 0 disables each limit): no joint
+    # turns more than max_joint_delta_rad, and the camera path is at most
+    # max_ee_path_ratio * straight-line distance + max_ee_path_slack_m.
+    camera_placement.max_joint_delta_rad: 1.57
+    camera_placement.max_ee_path_ratio: 1.5
+    camera_placement.max_ee_path_slack_m: 0.15
+    # Elbow above the shoulder-wrist line at the goal and along the motion.
+    camera_placement.require_elbow_up: true
+    # Base candidates keep the current heading so the base stays parallel to the
+    # Campetella and only translates (sideways/forward/reverse); face_camera = old behaviour.
+    camera_placement.base_yaw_mode: keep_current
+    camera_placement.base_yaw_tolerance: 0.1
+    # No base candidate rotates more than 45 deg from the current heading.
+    camera_placement.max_base_yaw_change_rad: 0.785

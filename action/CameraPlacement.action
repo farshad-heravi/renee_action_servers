@@ -3,6 +3,10 @@ geometry_msgs/PoseStamped camera_pose
 # Optional per-goal override. Empty uses the server configuration or ZED2i fallback.
 string camera_link
 bool lock_current_base
+# Skip the short-arm-motion limits (joint delta and camera path length), e.g.
+# right after the base moved and the arm starts from its stowed pose. The elbow
+# is still required to be up.
+bool allow_long_arm_motion
 ---
 bool success
 string message
