@@ -5,8 +5,10 @@
 
 #include <geometry_msgs/msg/transform.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <moveit_msgs/msg/joint_constraint.hpp>
 #include <moveit_msgs/msg/move_it_error_codes.hpp>
 #include <moveit_msgs/msg/robot_state.hpp>
+#include <moveit_msgs/srv/get_motion_plan.hpp>
 #include <moveit_msgs/srv/get_position_fk.hpp>
 #include <moveit_msgs/srv/get_position_ik.hpp>
 #include <moveit_msgs/srv/get_state_validity.hpp>
@@ -56,7 +58,6 @@ constexpr char kZed2iCameraLink[] =
 
 }  // namespace
 
-
 /** @brief Input required to solve one camera placement. */
 struct PlanningRequest
 {
@@ -85,73 +86,56 @@ struct PlanningFeedback
   std::uint32_t valid_candidates{0};
 };
 
-using FeedbackCallback = std::function<void(const PlanningFeedback &)>;
-using CancelCallback = std::function<bool()>;
+using FeedbackCallback = std::function<void (const PlanningFeedback &)>;
+using CancelCallback = std::function<bool ()>;
 
-/**
- * @brief Finds a navigable base pose and a collision-free UR5 IK solution.
- *
- * Positions are expressed in metres, angles in radians, and global poses in
- * the configured planning frame (normally `robot_map`).
- */
-class CameraPlacementPlanner
+struct MoveItDiagnostics
+{
+  std::uint32_t collision_disabled_ik_successes{0};
+  std::uint32_t collision_disabled_ik_failures{0};
+  std::uint32_t collision_rejections{0};
+  std::uint32_t valid_collision_disabled_solutions{0};
+  std::uint32_t ptp_planning_failures{0};
+  std::uint32_t ptp_timeouts{0};
+  std::uint32_t long_motion_rejections{0};
+  std::uint32_t elbow_down_rejections{0};
+  std::map<std::int32_t, std::uint32_t> collision_aware_error_codes;
+  std::map<std::int32_t, std::uint32_t> collision_disabled_error_codes;
+  std::set<std::string> collision_pairs;
+};
+
+struct CandidateSolution
+{
+  geometry_msgs::msg::PoseStamped base_pose;
+  sensor_msgs::msg::JointState arm_solution;
+  double arm_cost{0.0};
+  double navigation_cost{0.0};
+  double score{0.0};
+};
+
+/** @brief IK selection and plan-only Pilz PTP evaluation for the arm. */
+class ArmPlacementPlanner
 {
 public:
-  /**
-   * @brief Constructs the planner and its MoveIt, Nav2, and TF clients.
-   * @param node ROS node that owns parameters and clients.
-   * @param tf_buffer Shared TF buffer used to resolve robot and camera frames.
-   */
-  CameraPlacementPlanner(
-    rclcpp::Node & node,
-    std::shared_ptr<tf2_ros::Buffer> tf_buffer);
-
-  /**
-   * @brief Computes the best valid base and arm placement.
-   * @param request Desired optical-camera pose and planning options.
-   * @param feedback Callback used to report planning progress.
-   * @param cancelled Callback used to detect action cancellation.
-   * @return Best valid placement, or a failed solution with an explanatory message.
-   */
-  PlanningSolution plan(
-    const PlanningRequest & request,
-    const FeedbackCallback & feedback,
-    const CancelCallback & cancelled);
-
-  /** @brief Resolves an optional goal override against server configuration and fallback. */
-  std::string resolveCameraLink(const std::string & requested_camera_link) const;
-
-private:
-  struct MoveItDiagnostics
-  {
-    std::uint32_t collision_disabled_ik_successes{0};
-    std::uint32_t collision_disabled_ik_failures{0};
-    std::uint32_t collision_rejections{0};
-    std::uint32_t valid_collision_disabled_solutions{0};
-    std::uint32_t joint_path_rejections{0};
-    std::uint32_t long_motion_rejections{0};
-    std::uint32_t elbow_down_rejections{0};
-    std::map<std::int32_t, std::uint32_t> collision_aware_error_codes;
-    std::map<std::int32_t, std::uint32_t> collision_disabled_error_codes;
-    std::set<std::string> collision_pairs;
-  };
-
-  struct CandidateSolution
-  {
-    geometry_msgs::msg::PoseStamped base_pose;
-    sensor_msgs::msg::JointState arm_solution;
-    double arm_cost{0.0};
-    double navigation_cost{0.0};
-    double score{0.0};
-  };
-
-  void validateRequest(const PlanningRequest & request) const;
+  ArmPlacementPlanner(
+    rclcpp::Node & node, std::shared_ptr<tf2_ros::Buffer> tf_buffer,
+    const std::string & global_frame, double service_timeout);
   geometry_msgs::msg::PoseStamped cameraPoseToTool0(
     const PlanningRequest & request) const;
-  geometry_msgs::msg::PoseStamped currentBasePose() const;
-  std::vector<geometry_msgs::msg::PoseStamped> generateBaseCandidates(
-    const PlanningRequest & request) const;
   std::vector<double> currentArmJoints() const;
+  std::string resolveCameraLink(const std::string & requested_camera_link) const;
+  bool diagnosticsEnabled() const {return diagnose_ik_failures_;}
+  bool evaluateWithMoveIt(
+    const geometry_msgs::msg::PoseStamped & base_pose,
+    const geometry_msgs::msg::PoseStamped & tool0_pose,
+    const std::string & camera_link,
+    const std::optional<std::vector<double>> & ptp_start,
+    bool allow_long_arm_motion,
+    CandidateSolution & candidate,
+    MoveItDiagnostics & diagnostics,
+    const CancelCallback & cancelled);
+
+private:
   moveit_msgs::msg::RobotState baseRobotState(
     const geometry_msgs::msg::PoseStamped & base_pose) const;
   /** @brief Camera, shoulder, elbow and wrist positions of one arm state (global frame). */
@@ -163,15 +147,6 @@ private:
     tf2::Vector3 wrist;
   };
 
-  bool evaluateWithMoveIt(
-    const geometry_msgs::msg::PoseStamped & base_pose,
-    const geometry_msgs::msg::PoseStamped & tool0_pose,
-    const std::string & camera_link,
-    const std::optional<std::vector<double>> & ptp_start,
-    bool allow_long_arm_motion,
-    CandidateSolution & candidate,
-    MoveItDiagnostics & diagnostics,
-    const CancelCallback & cancelled);
   void unwrapTowards(const std::vector<double> & reference, std::vector<double> & positions) const;
   std::optional<ArmPoints> computeArmPoints(
     const geometry_msgs::msg::PoseStamped & base_pose,
@@ -181,8 +156,7 @@ private:
   bool isElbowUp(const ArmPoints & points) const;
   bool isArmMotionShort(
     const geometry_msgs::msg::PoseStamped & base_pose,
-    const std::vector<double> & start,
-    const std::vector<double> & goal,
+    const std::vector<std::vector<double>> & samples,
     const std::string & camera_link,
     bool allow_long_arm_motion,
     double & camera_path_length,
@@ -195,48 +169,28 @@ private:
     CandidateSolution & candidate,
     MoveItDiagnostics & diagnostics,
     const CancelCallback & cancelled);
-  bool isJointPathValid(
+  std::optional<std::vector<std::vector<double>>> planPtp(
     const geometry_msgs::msg::PoseStamped & base_pose,
-    const std::vector<double> & start,
-    const std::vector<double> & goal,
-    const CancelCallback & cancelled);
-  bool evaluateWithNav2(
-    CandidateSolution & candidate,
-    const CancelCallback & cancelled);
-  double calculateScore(const CandidateSolution & candidate) const;
-  void publishFeedback(
-    const FeedbackCallback & callback,
-    const std::string & phase,
-    std::uint32_t evaluated,
-    std::uint32_t valid) const;
+    const std::vector<double> & start, const std::vector<double> & goal,
+    MoveItDiagnostics & diagnostics, const CancelCallback & cancelled);
 
   rclcpp::Node & node_;
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   rclcpp::Client<moveit_msgs::srv::GetPositionIK>::SharedPtr ik_client_;
   rclcpp::Client<moveit_msgs::srv::GetPositionFK>::SharedPtr fk_client_;
   rclcpp::Client<moveit_msgs::srv::GetStateValidity>::SharedPtr validity_client_;
-  rclcpp_action::Client<nav2_msgs::action::ComputePathToPose>::SharedPtr navigation_client_;
+  rclcpp::Client<moveit_msgs::srv::GetMotionPlan>::SharedPtr plan_client_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
   mutable std::mutex joint_state_mutex_;
   sensor_msgs::msg::JointState latest_joint_state_;
   std::mt19937 rng_{std::random_device{}()};
 
   std::string global_frame_;
-  std::string base_frame_;
   std::string tool0_link_;
   std::string default_camera_link_;
   std::string virtual_joint_name_;
   std::string planning_group_;
   std::vector<std::string> arm_joint_names_;
-  double min_base_radius_;
-  double max_base_radius_;
-  double base_radius_step_;
-  int angular_samples_;
-  double yaw_offset_;
-  std::string base_yaw_mode_;
-  double base_yaw_tolerance_;
-  double max_base_yaw_change_rad_;
-  int max_navigation_candidates_;
   double service_timeout_sec_;
   double ik_timeout_sec_;
   bool diagnose_ik_failures_;
@@ -253,6 +207,38 @@ private:
   std::string wrist_link_;
 };
 
+/** @brief Base candidate generation and Nav2 path evaluation. */
+class BasePlacementPlanner
+{
+public:
+  BasePlacementPlanner(
+    rclcpp::Node & node, std::shared_ptr<tf2_ros::Buffer> tf_buffer,
+    const std::string & global_frame, double service_timeout);
+  geometry_msgs::msg::PoseStamped currentBasePose() const;
+  std::vector<geometry_msgs::msg::PoseStamped> generateBaseCandidates(
+    const PlanningRequest & request) const;
+  bool evaluateWithNav2(
+    CandidateSolution & candidate,
+    const CancelCallback & cancelled);
+  int maxNavigationCandidates() const {return max_navigation_candidates_;}
+
+private:
+  rclcpp::Node & node_;
+  std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
+  rclcpp_action::Client<nav2_msgs::action::ComputePathToPose>::SharedPtr navigation_client_;
+  std::string global_frame_;
+  std::string base_frame_;
+  double service_timeout_sec_;
+  double min_base_radius_;
+  double max_base_radius_;
+  double base_radius_step_;
+  int angular_samples_;
+  double yaw_offset_;
+  std::string base_yaw_mode_;
+  double base_yaw_tolerance_;
+  double max_base_yaw_change_rad_;
+  int max_navigation_candidates_;
+};
 
 namespace
 {
@@ -296,15 +282,13 @@ double pathLength(const nav_msgs::msg::Path & path)
 
 }  // namespace
 
-CameraPlacementPlanner::CameraPlacementPlanner(
+ArmPlacementPlanner::ArmPlacementPlanner(
   rclcpp::Node & node,
-  std::shared_ptr<tf2_ros::Buffer> tf_buffer)
-: node_(node), tf_buffer_(std::move(tf_buffer))
+  std::shared_ptr<tf2_ros::Buffer> tf_buffer,
+  const std::string & global_frame, double service_timeout)
+: node_(node), tf_buffer_(std::move(tf_buffer)),
+  global_frame_(global_frame), service_timeout_sec_(service_timeout)
 {
-  global_frame_ = node_.declare_parameter<std::string>(
-    "camera_placement.global_frame", "robot_map");
-  base_frame_ = node_.declare_parameter<std::string>(
-    "camera_placement.base_frame", "robot_base_footprint");
   tool0_link_ = node_.declare_parameter<std::string>(
     "camera_placement.tool0_link", "robot_arm_tool0");
   default_camera_link_ = node_.declare_parameter<std::string>(
@@ -318,36 +302,6 @@ CameraPlacementPlanner::CameraPlacementPlanner(
     {"robot_arm_shoulder_pan_joint", "robot_arm_shoulder_lift_joint",
       "robot_arm_elbow_joint", "robot_arm_wrist_1_joint",
       "robot_arm_wrist_2_joint", "robot_arm_wrist_3_joint"});
-  min_base_radius_ = node_.declare_parameter<double>(
-    "camera_placement.min_base_radius", 0.4);
-  max_base_radius_ = node_.declare_parameter<double>(
-    "camera_placement.max_base_radius", 0.8);
-  base_radius_step_ = node_.declare_parameter<double>(
-    "camera_placement.base_radius_step", 0.2);
-  angular_samples_ = node_.declare_parameter<int>(
-    "camera_placement.angular_samples", 12);
-  yaw_offset_ = node_.declare_parameter<double>(
-    "camera_placement.yaw_offset", 0.35);
-  // Base candidate heading. face_camera: towards the camera target
-  // (+-yaw_offset). keep_current: the current base heading
-  // (+-base_yaw_tolerance), so the base only translates along the machine
-  // (sideways, forward or in reverse) instead of rotating.
-  base_yaw_mode_ = node_.declare_parameter<std::string>(
-    "camera_placement.base_yaw_mode", "keep_current");
-  if (base_yaw_mode_ != "face_camera" && base_yaw_mode_ != "keep_current") {
-    throw std::invalid_argument(
-            "camera_placement.base_yaw_mode must be 'face_camera' or 'keep_current'");
-  }
-  base_yaw_tolerance_ = node_.declare_parameter<double>(
-    "camera_placement.base_yaw_tolerance", 0.1);
-  // Candidates whose heading differs more than this from the current base
-  // heading are dropped, in both modes (<= 0 disables).
-  max_base_yaw_change_rad_ = node_.declare_parameter<double>(
-    "camera_placement.max_base_yaw_change_rad", 0.785);
-  max_navigation_candidates_ = node_.declare_parameter<int>(
-    "camera_placement.max_navigation_candidates", 12);
-  service_timeout_sec_ = node_.declare_parameter<double>(
-    "camera_placement.service_timeout_sec", 10.0);
   ik_timeout_sec_ = node_.declare_parameter<double>(
     "camera_placement.ik_timeout_sec", 0.15);
   diagnose_ik_failures_ = node_.declare_parameter<bool>(
@@ -390,22 +344,40 @@ CameraPlacementPlanner::CameraPlacementPlanner(
   wrist_link_ = node_.declare_parameter<std::string>(
     "camera_placement.wrist_link", "robot_arm_wrist_1_link");
 
+  if (arm_joint_names_.empty() ||
+    std::set<std::string>(arm_joint_names_.begin(), arm_joint_names_.end()).size() !=
+    arm_joint_names_.size() || !std::isfinite(joint_path_resolution_) ||
+    joint_path_resolution_ <= 0.0)
+  {
+    throw std::invalid_argument(
+            "Arm joints must be unique and joint_path_resolution must be positive");
+  }
+  for (std::size_t index = 0; index < arm_joint_names_.size(); ++index) {
+    if (!std::isfinite(joint_lower_limits_[index]) || !std::isfinite(joint_upper_limits_[index]) ||
+      joint_lower_limits_[index] > joint_upper_limits_[index])
+    {
+      throw std::invalid_argument("Arm joint limits must be finite and ordered");
+    }
+  }
+
+  // Plan-only service: it never touches the MoveGroup execution action used to
+  // move the arm, so a placement query cannot interfere with a running motion.
+  const auto plan_service = node_.declare_parameter<std::string>(
+    "camera_placement.plan_service", "/robot/plan_kinematic_path");
+  plan_client_ = node_.create_client<moveit_msgs::srv::GetMotionPlan>(plan_service);
+
   const auto ik_service = node_.declare_parameter<std::string>(
     "camera_placement.ik_service", "/robot/compute_ik");
   const auto fk_service = node_.declare_parameter<std::string>(
     "camera_placement.fk_service", "/robot/compute_fk");
   const auto validity_service = node_.declare_parameter<std::string>(
     "camera_placement.validity_service", "/robot/check_state_validity");
-  const auto navigation_action = node_.declare_parameter<std::string>(
-    "camera_placement.navigation_action", "/robot/compute_path_to_pose");
   const auto joint_states_topic = node_.declare_parameter<std::string>(
     "camera_placement.joint_states_topic", "/robot/joint_states");
 
   ik_client_ = node_.create_client<moveit_msgs::srv::GetPositionIK>(ik_service);
   fk_client_ = node_.create_client<moveit_msgs::srv::GetPositionFK>(fk_service);
   validity_client_ = node_.create_client<moveit_msgs::srv::GetStateValidity>(validity_service);
-  navigation_client_ = rclcpp_action::create_client<nav2_msgs::action::ComputePathToPose>(
-    &node_, navigation_action);
   joint_state_sub_ = node_.create_subscription<sensor_msgs::msg::JointState>(
     joint_states_topic, rclcpp::SensorDataQoS(),
     [this](const sensor_msgs::msg::JointState::SharedPtr message) {
@@ -414,7 +386,54 @@ CameraPlacementPlanner::CameraPlacementPlanner(
     });
 }
 
-std::string CameraPlacementPlanner::resolveCameraLink(
+BasePlacementPlanner::BasePlacementPlanner(
+  rclcpp::Node & node, std::shared_ptr<tf2_ros::Buffer> tf_buffer,
+  const std::string & global_frame, double service_timeout)
+: node_(node), tf_buffer_(std::move(tf_buffer)),
+  global_frame_(global_frame), service_timeout_sec_(service_timeout)
+{
+  base_frame_ = node_.declare_parameter<std::string>(
+    "camera_placement.base_frame", "robot_base_footprint");
+  min_base_radius_ = node_.declare_parameter<double>(
+    "camera_placement.min_base_radius", 0.4);
+  max_base_radius_ = node_.declare_parameter<double>(
+    "camera_placement.max_base_radius", 0.8);
+  base_radius_step_ = node_.declare_parameter<double>(
+    "camera_placement.base_radius_step", 0.2);
+  angular_samples_ = node_.declare_parameter<int>(
+    "camera_placement.angular_samples", 12);
+  yaw_offset_ = node_.declare_parameter<double>(
+    "camera_placement.yaw_offset", 0.35);
+  // Base candidate heading. face_camera: towards the camera target
+  // (+-yaw_offset). keep_current: the current base heading
+  // (+-base_yaw_tolerance), so the base only translates along the machine
+  // (sideways, forward or in reverse) instead of rotating.
+  base_yaw_mode_ = node_.declare_parameter<std::string>(
+    "camera_placement.base_yaw_mode", "keep_current");
+  if (base_yaw_mode_ != "face_camera" && base_yaw_mode_ != "keep_current") {
+    throw std::invalid_argument(
+            "camera_placement.base_yaw_mode must be 'face_camera' or 'keep_current'");
+  }
+  base_yaw_tolerance_ = node_.declare_parameter<double>(
+    "camera_placement.base_yaw_tolerance", 0.1);
+  // Candidates whose heading differs more than this from the current base
+  // heading are dropped, in both modes (<= 0 disables).
+  max_base_yaw_change_rad_ = node_.declare_parameter<double>(
+    "camera_placement.max_base_yaw_change_rad", 0.785);
+  max_navigation_candidates_ = node_.declare_parameter<int>(
+    "camera_placement.max_navigation_candidates", 12);
+  const auto navigation_action = node_.declare_parameter<std::string>(
+    "camera_placement.navigation_action", "/robot/compute_path_to_pose");
+  navigation_client_ = rclcpp_action::create_client<nav2_msgs::action::ComputePathToPose>(
+    &node_, navigation_action);
+  if (min_base_radius_ <= 0.0 || max_base_radius_ < min_base_radius_ ||
+    base_radius_step_ <= 0.0 || angular_samples_ <= 0 || max_navigation_candidates_ <= 0)
+  {
+    throw std::invalid_argument("camera placement sampling parameters are invalid");
+  }
+}
+
+std::string ArmPlacementPlanner::resolveCameraLink(
   const std::string & requested_camera_link) const
 {
   if (!requested_camera_link.empty()) {
@@ -432,196 +451,7 @@ std::string CameraPlacementPlanner::resolveCameraLink(
   return kZed2iCameraLink;
 }
 
-PlanningSolution CameraPlacementPlanner::plan(
-  const PlanningRequest & request,
-  const FeedbackCallback & feedback,
-  const CancelCallback & cancelled)
-{
-  PlanningSolution result;
-  try {
-    validateRequest(request);
-    publishFeedback(feedback, "transforming_camera_pose", 0, 0);
-    result.end_effector_pose = cameraPoseToTool0(request);
-
-    if (cancelled && cancelled()) {
-      result.message = "Camera placement cancelled";
-      return result;
-    }
-
-    auto base_candidates = request.lock_current_base ?
-      std::vector<geometry_msgs::msg::PoseStamped>{currentBasePose()} :
-      generateBaseCandidates(request);
-
-    // With a locked base the returned joints are executed directly with a
-    // joint-space PTP motion, so the straight joint path from the current arm
-    // state must also be collision-free, not just the final state.
-    std::optional<std::vector<double>> ptp_start;
-    if (request.lock_current_base) {
-      ptp_start = currentArmJoints();
-    }
-
-    std::vector<CandidateSolution> arm_candidates;
-    MoveItDiagnostics moveit_diagnostics;
-    std::uint32_t evaluated = 0;
-    for (const auto & base_pose : base_candidates) {
-      if (cancelled && cancelled()) {
-        result.message = "Camera placement cancelled";
-        return result;
-      }
-
-      CandidateSolution candidate;
-      candidate.base_pose = base_pose;
-      if (evaluateWithMoveIt(
-          base_pose, result.end_effector_pose, request.camera_link, ptp_start,
-          request.allow_long_arm_motion, candidate, moveit_diagnostics, cancelled))
-      {
-        arm_candidates.push_back(std::move(candidate));
-      }
-      ++evaluated;
-      publishFeedback(
-        feedback, "checking_moveit", evaluated,
-        static_cast<std::uint32_t>(arm_candidates.size()));
-    }
-
-    if (arm_candidates.empty()) {
-      std::ostringstream message;
-      message << "MoveIt found no collision-free IK solution for any base candidate";
-      if (moveit_diagnostics.joint_path_rejections > 0) {
-        message << " (" << moveit_diagnostics.joint_path_rejections
-                << " IK solution(s) rejected because the PTP joint path from the "
-                   "current arm state collides)";
-      }
-      if (moveit_diagnostics.long_motion_rejections > 0) {
-        message << " (" << moveit_diagnostics.long_motion_rejections
-                << " IK solution(s) rejected because the arm motion from the current "
-                   "state is too long)";
-      }
-      if (moveit_diagnostics.elbow_down_rejections > 0) {
-        message << " (" << moveit_diagnostics.elbow_down_rejections
-                << " IK solution(s) rejected because the elbow is not up)";
-      }
-      if (diagnose_ik_failures_) {
-        message << ". Diagnostics: collision-disabled IK succeeded for "
-                << moveit_diagnostics.collision_disabled_ik_successes
-                << " candidate(s) and failed for "
-                << moveit_diagnostics.collision_disabled_ik_failures << " candidate(s)";
-        if (moveit_diagnostics.collision_rejections > 0) {
-          message << "; state validity rejected "
-                  << moveit_diagnostics.collision_rejections << " candidate(s)";
-        }
-        if (moveit_diagnostics.valid_collision_disabled_solutions > 0) {
-          message << "; " << moveit_diagnostics.valid_collision_disabled_solutions
-                  << " collision-disabled solution(s) were state-valid, indicating an "
-                     "IK timeout/search issue rather than collision";
-        }
-        if (!moveit_diagnostics.collision_pairs.empty()) {
-          message << "; contacts: ";
-          bool first = true;
-          for (const auto & pair : moveit_diagnostics.collision_pairs) {
-            if (!first) {
-              message << ", ";
-            }
-            message << pair;
-            first = false;
-          }
-        }
-        if (!moveit_diagnostics.collision_disabled_error_codes.empty()) {
-          message << "; collision-disabled MoveIt codes: ";
-          bool first = true;
-          for (const auto & entry : moveit_diagnostics.collision_disabled_error_codes)
-          {
-            if (!first) {
-              message << ", ";
-            }
-            message << entry.first << " (" << entry.second << ')';
-            first = false;
-          }
-        }
-      }
-      result.message = message.str();
-      return result;
-    }
-
-    std::sort(
-      arm_candidates.begin(), arm_candidates.end(),
-      [](const CandidateSolution & left, const CandidateSolution & right) {
-        return left.arm_cost < right.arm_cost;
-      });
-
-    if (!request.lock_current_base &&
-      arm_candidates.size() > static_cast<std::size_t>(max_navigation_candidates_))
-    {
-      arm_candidates.resize(static_cast<std::size_t>(max_navigation_candidates_));
-    }
-
-    std::vector<CandidateSolution> valid_candidates;
-    evaluated = 0;
-    for (auto & candidate : arm_candidates) {
-      if (cancelled && cancelled()) {
-        result.message = "Camera placement cancelled";
-        return result;
-      }
-
-      const bool navigation_valid = request.lock_current_base ||
-        evaluateWithNav2(candidate, cancelled);
-      if (navigation_valid) {
-        candidate.score = calculateScore(candidate);
-        valid_candidates.push_back(std::move(candidate));
-      }
-      ++evaluated;
-      publishFeedback(
-        feedback, request.lock_current_base ? "validating_current_base" : "checking_nav2",
-        evaluated, static_cast<std::uint32_t>(valid_candidates.size()));
-    }
-
-    if (valid_candidates.empty()) {
-      result.message = "Nav2 found no path to any kinematically valid base candidate";
-      return result;
-    }
-
-    const auto best = std::min_element(
-      valid_candidates.begin(), valid_candidates.end(),
-      [](const CandidateSolution & left, const CandidateSolution & right) {
-        return left.score < right.score;
-      });
-
-    result.success = true;
-    result.message = "Camera placement found";
-    result.base_pose = best->base_pose;
-    result.arm_solution = best->arm_solution;
-    result.score = best->score;
-    publishFeedback(
-      feedback, "completed", evaluated,
-      static_cast<std::uint32_t>(valid_candidates.size()));
-  } catch (const std::exception & exception) {
-    result.message = exception.what();
-  }
-  return result;
-}
-
-void CameraPlacementPlanner::validateRequest(const PlanningRequest & request) const
-{
-  if (request.camera_pose.header.frame_id != global_frame_) {
-    throw std::invalid_argument(
-            "camera_pose must use global frame '" + global_frame_ + "'");
-  }
-  if (request.camera_link.empty()) {
-    throw std::invalid_argument("camera_link cannot be empty");
-  }
-  if (!isFinitePose(request.camera_pose.pose)) {
-    throw std::invalid_argument("camera_pose contains non-finite values");
-  }
-  if (quaternionNorm(request.camera_pose.pose.orientation) <= kQuaternionEpsilon) {
-    throw std::invalid_argument("camera_pose orientation quaternion cannot be zero");
-  }
-  if (min_base_radius_ <= 0.0 || max_base_radius_ < min_base_radius_ ||
-    base_radius_step_ <= 0.0 || angular_samples_ <= 0 || max_navigation_candidates_ <= 0)
-  {
-    throw std::invalid_argument("camera placement sampling parameters are invalid");
-  }
-}
-
-geometry_msgs::msg::PoseStamped CameraPlacementPlanner::cameraPoseToTool0(
+geometry_msgs::msg::PoseStamped ArmPlacementPlanner::cameraPoseToTool0(
   const PlanningRequest & request) const
 {
   const auto tool0_to_camera = tf_buffer_->lookupTransform(
@@ -646,89 +476,7 @@ geometry_msgs::msg::PoseStamped CameraPlacementPlanner::cameraPoseToTool0(
   return tool0_pose;
 }
 
-geometry_msgs::msg::PoseStamped CameraPlacementPlanner::currentBasePose() const
-{
-  const auto transform = tf_buffer_->lookupTransform(
-    global_frame_, base_frame_, tf2::TimePointZero,
-    tf2::durationFromSec(service_timeout_sec_));
-  geometry_msgs::msg::PoseStamped pose;
-  pose.header = transform.header;
-  pose.pose.position.x = transform.transform.translation.x;
-  pose.pose.position.y = transform.transform.translation.y;
-  pose.pose.position.z = transform.transform.translation.z;
-  pose.pose.orientation = transform.transform.rotation;
-
-
-  RCLCPP_INFO(
-    node_.get_logger(), "Current base pose: (%.3f, %.3f, %.3f) orientation (%.3f, %.3f, %.3f, %.3f)",
-    pose.pose.position.x, pose.pose.position.y, pose.pose.position.z,
-    pose.pose.orientation.x, pose.pose.orientation.y,
-    pose.pose.orientation.z, pose.pose.orientation.w);
-  return pose;
-}
-
-std::vector<geometry_msgs::msg::PoseStamped>
-CameraPlacementPlanner::generateBaseCandidates(const PlanningRequest & request) const
-{
-  std::vector<geometry_msgs::msg::PoseStamped> candidates;
-  const std::vector<double> yaw_offsets{-yaw_offset_, 0.0, yaw_offset_};
-
-  const auto current = currentBasePose().pose.orientation;
-  const double current_yaw = std::atan2(
-    2.0 * (current.w * current.z + current.x * current.y),
-    1.0 - 2.0 * (current.y * current.y + current.z * current.z));
-  const auto within_yaw_change = [this, current_yaw](const double yaw) {
-      const double change = std::abs(std::remainder(yaw - current_yaw, 2.0 * kPi));
-      return max_base_yaw_change_rad_ <= 0.0 || change <= max_base_yaw_change_rad_;
-    };
-
-  // keep_current: the same headings for every position.
-  std::vector<double> fixed_yaws;
-  if (base_yaw_mode_ == "keep_current") {
-    fixed_yaws.push_back(current_yaw);
-    if (base_yaw_tolerance_ > 0.0) {
-      fixed_yaws.push_back(current_yaw - base_yaw_tolerance_);
-      fixed_yaws.push_back(current_yaw + base_yaw_tolerance_);
-    }
-  }
-
-  for (double radius = min_base_radius_;
-    radius <= max_base_radius_ + 1e-9; radius += base_radius_step_)
-  {
-    for (int index = 0; index < angular_samples_; ++index) {
-      const double angle = 2.0 * kPi * static_cast<double>(index) /
-        static_cast<double>(angular_samples_);
-      const double x = request.camera_pose.pose.position.x + radius * std::cos(angle);
-      const double y = request.camera_pose.pose.position.y + radius * std::sin(angle);
-      const double face_camera_yaw = std::atan2(
-        request.camera_pose.pose.position.y - y,
-        request.camera_pose.pose.position.x - x);
-
-      std::vector<double> yaws = fixed_yaws;
-      if (yaws.empty()) {
-        for (const double offset : yaw_offsets) {
-          yaws.push_back(face_camera_yaw + offset);
-        }
-      }
-      for (const double yaw : yaws) {
-        if (!within_yaw_change(yaw)) {
-          continue;
-        }
-        geometry_msgs::msg::PoseStamped candidate;
-        candidate.header.frame_id = global_frame_;
-        candidate.header.stamp = node_.now();
-        candidate.pose.position.x = x;
-        candidate.pose.position.y = y;
-        candidate.pose.position.z = 0.0;
-        candidate.pose.orientation = yawToQuaternion(yaw);
-        candidates.push_back(std::move(candidate));
-      }
-    }
-  }
-  return candidates;
-}
-
-std::vector<double> CameraPlacementPlanner::currentArmJoints() const
+std::vector<double> ArmPlacementPlanner::currentArmJoints() const
 {
   sensor_msgs::msg::JointState joint_state;
   {
@@ -744,12 +492,15 @@ std::vector<double> CameraPlacementPlanner::currentArmJoints() const
       throw std::runtime_error(
               "No joint state received for arm joint '" + joint_name + "'");
     }
+    if (!std::isfinite(joint_state.position[index])) {
+      throw std::runtime_error("Non-finite arm joint state for '" + joint_name + "'");
+    }
     positions.push_back(joint_state.position[index]);
   }
   return positions;
 }
 
-moveit_msgs::msg::RobotState CameraPlacementPlanner::baseRobotState(
+moveit_msgs::msg::RobotState ArmPlacementPlanner::baseRobotState(
   const geometry_msgs::msg::PoseStamped & base_pose) const
 {
   moveit_msgs::msg::RobotState state;
@@ -767,7 +518,7 @@ moveit_msgs::msg::RobotState CameraPlacementPlanner::baseRobotState(
   return state;
 }
 
-bool CameraPlacementPlanner::evaluateWithMoveIt(
+bool ArmPlacementPlanner::evaluateWithMoveIt(
   const geometry_msgs::msg::PoseStamped & base_pose,
   const geometry_msgs::msg::PoseStamped & tool0_pose,
   const std::string & camera_link,
@@ -830,15 +581,15 @@ bool CameraPlacementPlanner::evaluateWithMoveIt(
     }
 
     unwrapTowards(*ptp_start, positions);
-    double camera_path_length = 0.0;
-    if (!isArmMotionShort(
-        base_pose, *ptp_start, positions, camera_link, allow_long_arm_motion,
-        camera_path_length, diagnostics, cancelled))
-    {
+    const auto samples = planPtp(base_pose, *ptp_start, positions, diagnostics, cancelled);
+    if (!samples) {
       continue;
     }
-    if (!isJointPathValid(base_pose, *ptp_start, positions, cancelled)) {
-      ++diagnostics.joint_path_rejections;
+    double camera_path_length = 0.0;
+    if (!isArmMotionShort(
+        base_pose, *samples, camera_link, allow_long_arm_motion,
+        camera_path_length, diagnostics, cancelled))
+    {
       continue;
     }
     attempt_candidate.arm_cost = camera_path_length;
@@ -857,7 +608,7 @@ bool CameraPlacementPlanner::evaluateWithMoveIt(
   return true;
 }
 
-void CameraPlacementPlanner::unwrapTowards(
+void ArmPlacementPlanner::unwrapTowards(
   const std::vector<double> & reference, std::vector<double> & positions) const
 {
   // UR joints span +-2*pi, so an IK value and the same value +-2*pi reach the
@@ -876,13 +627,16 @@ void CameraPlacementPlanner::unwrapTowards(
   }
 }
 
-std::optional<CameraPlacementPlanner::ArmPoints> CameraPlacementPlanner::computeArmPoints(
+std::optional<ArmPlacementPlanner::ArmPoints> ArmPlacementPlanner::computeArmPoints(
   const geometry_msgs::msg::PoseStamped & base_pose,
   const std::vector<double> & positions,
   const std::string & camera_link,
   const CancelCallback & cancelled)
 {
   using namespace std::chrono_literals;
+  if (cancelled && cancelled()) {
+    return std::nullopt;
+  }
   auto request = std::make_shared<moveit_msgs::srv::GetPositionFK::Request>();
   request->header.frame_id = global_frame_;
   request->header.stamp = node_.now();
@@ -908,14 +662,19 @@ std::optional<CameraPlacementPlanner::ArmPoints> CameraPlacementPlanner::compute
       response->error_code.val);
     return std::nullopt;
   }
+  for (const auto & pose : response->pose_stamped) {
+    if (!isFinitePose(pose.pose)) {
+      return std::nullopt;
+    }
+  }
   const auto point = [&response](const std::size_t index) {
-      const auto & position = response->pose_stamped[index].pose.position;
-      return tf2::Vector3(position.x, position.y, position.z);
-    };
+    const auto & position = response->pose_stamped[index].pose.position;
+    return tf2::Vector3(position.x, position.y, position.z);
+  };
   return ArmPoints{point(0), point(1), point(2), point(3)};
 }
 
-bool CameraPlacementPlanner::isElbowUp(const ArmPoints & points) const
+bool ArmPlacementPlanner::isElbowUp(const ArmPoints & points) const
 {
   // The elbow is up when it lies above the shoulder-wrist line (global z up).
   const tf2::Vector3 line = points.wrist - points.shoulder;
@@ -928,44 +687,191 @@ bool CameraPlacementPlanner::isElbowUp(const ArmPoints & points) const
   return points.elbow.z() > on_line.z();
 }
 
-bool CameraPlacementPlanner::isArmMotionShort(
+std::optional<std::vector<std::vector<double>>> ArmPlacementPlanner::planPtp(
   const geometry_msgs::msg::PoseStamped & base_pose,
-  const std::vector<double> & start,
-  const std::vector<double> & goal,
+  const std::vector<double> & start, const std::vector<double> & goal,
+  MoveItDiagnostics & diagnostics, const CancelCallback & cancelled)
+{
+  using namespace std::chrono_literals;
+  if ((cancelled && cancelled()) || start.size() != arm_joint_names_.size() ||
+    goal.size() != arm_joint_names_.size())
+  {
+    return std::nullopt;
+  }
+  if (!plan_client_->wait_for_service(std::chrono::duration<double>(service_timeout_sec_))) {
+    throw std::runtime_error("MoveIt plan_kinematic_path service is unavailable for Pilz PTP");
+  }
+
+  if (cancelled && cancelled()) {
+    return std::nullopt;
+  }
+  auto request = std::make_shared<moveit_msgs::srv::GetMotionPlan::Request>();
+  auto & plan_request = request->motion_plan_request;
+  plan_request.pipeline_id = "pilz_industrial_motion_planner";
+  plan_request.planner_id = "PTP";
+  plan_request.group_name = planning_group_;
+  plan_request.num_planning_attempts = 1;
+  plan_request.allowed_planning_time = service_timeout_sec_;
+  plan_request.max_velocity_scaling_factor = 0.25;
+  plan_request.max_acceleration_scaling_factor = 0.25;
+  plan_request.start_state = baseRobotState(base_pose);
+  auto & joints = plan_request.start_state.joint_state;
+  joints.name = arm_joint_names_;
+  joints.position = start;
+  // Pilz PTP requires a stationary start state.
+  joints.velocity.assign(start.size(), 0.0);
+  moveit_msgs::msg::Constraints target;
+  for (std::size_t index = 0; index < arm_joint_names_.size(); ++index) {
+    moveit_msgs::msg::JointConstraint constraint;
+    constraint.joint_name = arm_joint_names_[index];
+    constraint.position = goal[index];
+    constraint.tolerance_above = 1e-6;
+    constraint.tolerance_below = 1e-6;
+    constraint.weight = 1.0;
+    target.joint_constraints.push_back(constraint);
+  }
+  plan_request.goal_constraints.push_back(target);
+
+  auto future = plan_client_->async_send_request(request);
+  const auto deadline = std::chrono::steady_clock::now() +
+    std::chrono::duration<double>(service_timeout_sec_);
+  while (future.wait_for(50ms) != std::future_status::ready) {
+    if ((cancelled && cancelled()) || std::chrono::steady_clock::now() >= deadline) {
+      if (!(cancelled && cancelled())) {
+        ++diagnostics.ptp_timeouts;
+      }
+      plan_client_->remove_pending_request(future);
+      return std::nullopt;
+    }
+  }
+  if (cancelled && cancelled()) {
+    return std::nullopt;
+  }
+  const auto response = future.get();
+  const auto & plan_response = response->motion_plan_response;
+  if (plan_response.error_code.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
+    ++diagnostics.ptp_planning_failures;
+    RCLCPP_WARN(
+      node_.get_logger(), "Pilz PTP planning failed (code %d)", plan_response.error_code.val);
+    return std::nullopt;
+  }
+
+  const auto & trajectory = plan_response.trajectory.joint_trajectory;
+  const auto reject = [&diagnostics]() -> std::optional<std::vector<std::vector<double>>> {
+    ++diagnostics.ptp_planning_failures;
+    return std::nullopt;
+  };
+  if (trajectory.points.empty() || trajectory.joint_names.size() != arm_joint_names_.size() ||
+    std::set<std::string>(trajectory.joint_names.begin(), trajectory.joint_names.end()).size() !=
+    trajectory.joint_names.size())
+  {
+    return reject();
+  }
+  std::vector<std::size_t> indices;
+  for (const auto & name : arm_joint_names_) {
+    const auto found = std::find(
+      trajectory.joint_names.begin(), trajectory.joint_names.end(),
+      name);
+    if (found == trajectory.joint_names.end()) {
+      return reject();
+    }
+    indices.push_back(
+      static_cast<std::size_t>(std::distance(
+        trajectory.joint_names.begin(),
+        found)));
+  }
+
+  std::vector<std::vector<double>> samples;
+  double previous_time = -1.0;
+  for (const auto & point : trajectory.points) {
+    if (cancelled && cancelled()) {
+      return std::nullopt;
+    }
+    const double time = rclcpp::Duration(point.time_from_start).seconds();
+    if (point.positions.size() != indices.size() || time < 0.0 ||
+      (!samples.empty() && time <= previous_time))
+    {
+      return reject();
+    }
+    previous_time = time;
+    std::vector<double> positions;
+    for (std::size_t index = 0; index < indices.size(); ++index) {
+      const double value = point.positions[indices[index]];
+      if (!std::isfinite(value) || value < joint_lower_limits_[index] - 1e-6 ||
+        value > joint_upper_limits_[index] + 1e-6)
+      {
+        return reject();
+      }
+      positions.push_back(value);
+    }
+    if (samples.empty()) {
+      for (std::size_t index = 0; index < start.size(); ++index) {
+        if (std::abs(positions[index] - start[index]) > 1e-4) {
+          return reject();
+        }
+      }
+    } else {
+      const auto previous = samples.back();
+      double max_delta = 0.0;
+      for (std::size_t index = 0; index < positions.size(); ++index) {
+        max_delta = std::max(max_delta, std::abs(positions[index] - previous[index]));
+      }
+      // Densify returned PTP segments; do not reconstruct a separate start-goal path.
+      const int steps = std::max(
+        1,
+        static_cast<int>(std::ceil(max_delta / std::max(joint_path_resolution_, 1e-3))));
+      for (int step = 1; step < steps; ++step) {
+        const double fraction = static_cast<double>(step) / steps;
+        std::vector<double> intermediate(positions.size());
+        for (std::size_t index = 0; index < positions.size(); ++index) {
+          intermediate[index] = previous[index] + fraction * (positions[index] - previous[index]);
+        }
+        samples.push_back(std::move(intermediate));
+      }
+    }
+    samples.push_back(std::move(positions));
+  }
+  for (std::size_t index = 0; index < goal.size(); ++index) {
+    // Compare the actual angles, not their values modulo 2*pi.
+    if (std::abs(samples.back()[index] - goal[index]) > 1e-4) {
+      return reject();
+    }
+  }
+  return samples;
+}
+
+bool ArmPlacementPlanner::isArmMotionShort(
+  const geometry_msgs::msg::PoseStamped & base_pose,
+  const std::vector<std::vector<double>> & samples,
   const std::string & camera_link,
   bool allow_long_arm_motion,
   double & camera_path_length,
   MoveItDiagnostics & diagnostics,
   const CancelCallback & cancelled)
 {
-  double max_delta = 0.0;
-  for (std::size_t index = 0; index < start.size(); ++index) {
-    max_delta = std::max(max_delta, std::abs(goal[index] - start[index]));
+  if (samples.empty()) {
+    return false;
   }
   const bool limit_motion = !allow_long_arm_motion;
+  double max_delta = 0.0;
+  for (const auto & positions : samples) {
+    for (std::size_t index = 0; index < positions.size(); ++index) {
+      max_delta = std::max(max_delta, std::abs(positions[index] - samples.front()[index]));
+    }
+  }
   if (limit_motion && max_joint_delta_rad_ > 0.0 && max_delta > max_joint_delta_rad_) {
     ++diagnostics.long_motion_rejections;
     return false;
   }
-  camera_path_length = 0.0;
-  if ((!limit_motion || max_ee_path_ratio_ <= 0.0) && !require_elbow_up_) {
-    return true;
-  }
 
-  // Same samples as the PTP collision check (straight line in joint space).
-  // The elbow must end up and, if it starts up, stay up along the motion.
-  const int steps = std::max(
-    1, static_cast<int>(std::ceil(max_delta / std::max(joint_path_resolution_, 1e-3))));
-  std::vector<double> positions(start.size());
+  camera_path_length = 0.0;
   tf2::Vector3 first_camera;
   tf2::Vector3 previous_camera;
   bool start_elbow_up = true;
-  for (int step = 0; step <= steps; ++step) {
-    const double fraction = static_cast<double>(step) / static_cast<double>(steps);
-    for (std::size_t index = 0; index < start.size(); ++index) {
-      positions[index] = start[index] + fraction * (goal[index] - start[index]);
-    }
-    const auto points = computeArmPoints(base_pose, positions, camera_link, cancelled);
+  for (std::size_t step = 0; step < samples.size(); ++step) {
+    // Collisions along the trajectory are already checked by the Pilz
+    // pipeline (ValidateSolution adapter) in planPtp; here only FK.
+    const auto points = computeArmPoints(base_pose, samples[step], camera_link, cancelled);
     if (!points) {
       return false;
     }
@@ -973,7 +879,8 @@ bool CameraPlacementPlanner::isArmMotionShort(
       const bool elbow_up = isElbowUp(*points);
       if (step == 0) {
         start_elbow_up = elbow_up;
-      } else if (!elbow_up && (start_elbow_up || step == steps)) {
+      }
+      if (!elbow_up && (start_elbow_up || step + 1 == samples.size())) {
         ++diagnostics.elbow_down_rejections;
         return false;
       }
@@ -985,7 +892,6 @@ bool CameraPlacementPlanner::isArmMotionShort(
     }
     previous_camera = points->camera;
   }
-
   if (limit_motion && max_ee_path_ratio_ > 0.0) {
     const double straight = (previous_camera - first_camera).length();
     if (camera_path_length > max_ee_path_ratio_ * straight + max_ee_path_slack_m_) {
@@ -996,51 +902,7 @@ bool CameraPlacementPlanner::isArmMotionShort(
   return true;
 }
 
-bool CameraPlacementPlanner::isJointPathValid(
-  const geometry_msgs::msg::PoseStamped & base_pose,
-  const std::vector<double> & start,
-  const std::vector<double> & goal,
-  const CancelCallback & cancelled)
-{
-  using namespace std::chrono_literals;
-  // Pilz PTP interpolates all joints synchronously, so its geometric path is
-  // the straight line between start and goal in joint space.
-  double max_delta = 0.0;
-  for (std::size_t index = 0; index < start.size(); ++index) {
-    max_delta = std::max(max_delta, std::abs(goal[index] - start[index]));
-  }
-  const int steps = std::max(
-    1, static_cast<int>(std::ceil(max_delta / std::max(joint_path_resolution_, 1e-3))));
-
-  auto request = std::make_shared<moveit_msgs::srv::GetStateValidity::Request>();
-  request->group_name = planning_group_;
-  request->robot_state = baseRobotState(base_pose);
-  request->robot_state.joint_state.name = arm_joint_names_;
-  request->robot_state.joint_state.position.resize(start.size());
-  // The end points are already known to be valid (current state and the
-  // validated IK solution), so only the interior samples are checked.
-  for (int step = 1; step < steps; ++step) {
-    const double fraction = static_cast<double>(step) / static_cast<double>(steps);
-    for (std::size_t index = 0; index < start.size(); ++index) {
-      request->robot_state.joint_state.position[index] =
-        start[index] + fraction * (goal[index] - start[index]);
-    }
-    auto future = validity_client_->async_send_request(request);
-    const auto deadline = std::chrono::steady_clock::now() +
-      std::chrono::duration<double>(service_timeout_sec_);
-    while (future.wait_for(50ms) != std::future_status::ready) {
-      if ((cancelled && cancelled()) || std::chrono::steady_clock::now() >= deadline) {
-        return false;
-      }
-    }
-    if (!future.get()->valid) {
-      return false;
-    }
-  }
-  return true;
-}
-
-bool CameraPlacementPlanner::solveIk(
+bool ArmPlacementPlanner::solveIk(
   const geometry_msgs::msg::PoseStamped & base_pose,
   const geometry_msgs::msg::PoseStamped & tool0_pose,
   const std::optional<std::vector<double>> & seed,
@@ -1168,6 +1030,9 @@ bool CameraPlacementPlanner::solveIk(
       return false;
     }
     const double position = ik_response->solution.joint_state.position[position_index];
+    if (!std::isfinite(position)) {
+      return false;
+    }
     candidate.arm_solution.name.push_back(desired_name);
     candidate.arm_solution.position.push_back(position);
     cost += std::abs(position);
@@ -1176,7 +1041,89 @@ bool CameraPlacementPlanner::solveIk(
   return true;
 }
 
-bool CameraPlacementPlanner::evaluateWithNav2(
+geometry_msgs::msg::PoseStamped BasePlacementPlanner::currentBasePose() const
+{
+  const auto transform = tf_buffer_->lookupTransform(
+    global_frame_, base_frame_, tf2::TimePointZero,
+    tf2::durationFromSec(service_timeout_sec_));
+  geometry_msgs::msg::PoseStamped pose;
+  pose.header = transform.header;
+  pose.pose.position.x = transform.transform.translation.x;
+  pose.pose.position.y = transform.transform.translation.y;
+  pose.pose.position.z = transform.transform.translation.z;
+  pose.pose.orientation = transform.transform.rotation;
+
+  RCLCPP_INFO(
+    node_.get_logger(),
+    "Current base pose: (%.3f, %.3f, %.3f) orientation (%.3f, %.3f, %.3f, %.3f)",
+    pose.pose.position.x, pose.pose.position.y, pose.pose.position.z,
+    pose.pose.orientation.x, pose.pose.orientation.y,
+    pose.pose.orientation.z, pose.pose.orientation.w);
+  return pose;
+}
+
+std::vector<geometry_msgs::msg::PoseStamped>
+BasePlacementPlanner::generateBaseCandidates(const PlanningRequest & request) const
+{
+  std::vector<geometry_msgs::msg::PoseStamped> candidates;
+  const std::vector<double> yaw_offsets{-yaw_offset_, 0.0, yaw_offset_};
+
+  const auto current = currentBasePose().pose.orientation;
+  const double current_yaw = std::atan2(
+    2.0 * (current.w * current.z + current.x * current.y),
+    1.0 - 2.0 * (current.y * current.y + current.z * current.z));
+  const auto within_yaw_change = [this, current_yaw](const double yaw) {
+    const double change = std::abs(std::remainder(yaw - current_yaw, 2.0 * kPi));
+    return max_base_yaw_change_rad_ <= 0.0 || change <= max_base_yaw_change_rad_;
+  };
+
+  // keep_current: the same headings for every position.
+  std::vector<double> fixed_yaws;
+  if (base_yaw_mode_ == "keep_current") {
+    fixed_yaws.push_back(current_yaw);
+    if (base_yaw_tolerance_ > 0.0) {
+      fixed_yaws.push_back(current_yaw - base_yaw_tolerance_);
+      fixed_yaws.push_back(current_yaw + base_yaw_tolerance_);
+    }
+  }
+
+  for (double radius = min_base_radius_;
+    radius <= max_base_radius_ + 1e-9; radius += base_radius_step_)
+  {
+    for (int index = 0; index < angular_samples_; ++index) {
+      const double angle = 2.0 * kPi * static_cast<double>(index) /
+        static_cast<double>(angular_samples_);
+      const double x = request.camera_pose.pose.position.x + radius * std::cos(angle);
+      const double y = request.camera_pose.pose.position.y + radius * std::sin(angle);
+      const double face_camera_yaw = std::atan2(
+        request.camera_pose.pose.position.y - y,
+        request.camera_pose.pose.position.x - x);
+
+      std::vector<double> yaws = fixed_yaws;
+      if (yaws.empty()) {
+        for (const double offset : yaw_offsets) {
+          yaws.push_back(face_camera_yaw + offset);
+        }
+      }
+      for (const double yaw : yaws) {
+        if (!within_yaw_change(yaw)) {
+          continue;
+        }
+        geometry_msgs::msg::PoseStamped candidate;
+        candidate.header.frame_id = global_frame_;
+        candidate.header.stamp = node_.now();
+        candidate.pose.position.x = x;
+        candidate.pose.position.y = y;
+        candidate.pose.position.z = 0.0;
+        candidate.pose.orientation = yawToQuaternion(yaw);
+        candidates.push_back(std::move(candidate));
+      }
+    }
+  }
+  return candidates;
+}
+
+bool BasePlacementPlanner::evaluateWithNav2(
   CandidateSolution & candidate,
   const CancelCallback & cancelled)
 {
@@ -1225,24 +1172,6 @@ bool CameraPlacementPlanner::evaluateWithNav2(
   return true;
 }
 
-double CameraPlacementPlanner::calculateScore(const CandidateSolution & candidate) const
-{
-  return candidate.navigation_cost + 0.25 * candidate.arm_cost;
-}
-
-void CameraPlacementPlanner::publishFeedback(
-  const FeedbackCallback & callback,
-  const std::string & phase,
-  const std::uint32_t evaluated,
-  const std::uint32_t valid) const
-{
-  if (callback) {
-    callback(PlanningFeedback{phase, evaluated, valid});
-  }
-}
-
-
-
 /** @brief ROS action server with its private camera-placement implementation. */
 class CameraPlacementActionServer : public rclcpp::Node
 {
@@ -1253,7 +1182,17 @@ public:
   {
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
-    planner_ = std::make_unique<CameraPlacementPlanner>(*this, tf_buffer_);
+    global_frame_ = declare_parameter<std::string>(
+      "camera_placement.global_frame", "robot_map");
+    service_timeout_sec_ = declare_parameter<double>(
+      "camera_placement.service_timeout_sec", 10.0);
+    if (!std::isfinite(service_timeout_sec_) || service_timeout_sec_ <= 0.0) {
+      throw std::invalid_argument("camera_placement.service_timeout_sec must be positive");
+    }
+    arm_planner_ = std::make_unique<ArmPlacementPlanner>(
+      *this, tf_buffer_, global_frame_, service_timeout_sec_);
+    base_planner_ = std::make_unique<BasePlacementPlanner>(
+      *this, tf_buffer_, global_frame_, service_timeout_sec_);
 
     action_server_ = rclcpp_action::create_server<Action>(
       this,
@@ -1271,6 +1210,17 @@ public:
   }
 
 private:
+  PlanningSolution plan(
+    const PlanningRequest & request, const FeedbackCallback & feedback,
+    const CancelCallback & cancelled);
+  void validateRequest(const PlanningRequest & request) const;
+  double calculateScore(const CandidateSolution & candidate) const;
+  void publishFeedback(
+    const FeedbackCallback & callback,
+    const std::string & phase,
+    std::uint32_t evaluated,
+    std::uint32_t valid) const;
+
   using Action = renee_action_servers::action::CameraPlacement;
   using GoalHandle = rclcpp_action::ServerGoalHandle<Action>;
 
@@ -1309,18 +1259,19 @@ private:
     const auto goal = goal_handle->get_goal();
     PlanningRequest request;
     request.camera_pose = goal->camera_pose;
-    request.camera_link = planner_->resolveCameraLink(goal->camera_link);
+    request.camera_link = arm_planner_->resolveCameraLink(goal->camera_link);
     request.lock_current_base = goal->lock_current_base;
     request.allow_long_arm_motion = goal->allow_long_arm_motion;
 
     RCLCPP_INFO(
-      get_logger(), "Planning camera pose: position=(%.3f, %.3f, %.3f) orientation=(%.4f, %.4f, %.4f, %.4f)",
+      get_logger(),
+      "Planning camera pose: position=(%.3f, %.3f, %.3f) orientation=(%.4f, %.4f, %.4f, %.4f)",
       request.camera_pose.pose.position.x, request.camera_pose.pose.position.y,
       request.camera_pose.pose.position.z, request.camera_pose.pose.orientation.x,
       request.camera_pose.pose.orientation.y, request.camera_pose.pose.orientation.z,
       request.camera_pose.pose.orientation.w);
 
-    const auto solution = planner_->plan(
+    const auto solution = plan(
       request,
       [this, goal_handle](const PlanningFeedback & update) {
         auto feedback = std::make_shared<Action::Feedback>();
@@ -1363,10 +1314,224 @@ private:
 
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
-  std::unique_ptr<CameraPlacementPlanner> planner_;
+  std::string global_frame_;
+  double service_timeout_sec_;
+  std::unique_ptr<ArmPlacementPlanner> arm_planner_;
+  std::unique_ptr<BasePlacementPlanner> base_planner_;
   rclcpp_action::Server<Action>::SharedPtr action_server_;
   std::atomic<bool> active_goal_{false};
 };
+
+PlanningSolution CameraPlacementActionServer::plan(
+  const PlanningRequest & request,
+  const FeedbackCallback & feedback,
+  const CancelCallback & cancelled)
+{
+  PlanningSolution result;
+  try {
+    validateRequest(request);
+    publishFeedback(feedback, "transforming_camera_pose", 0, 0);
+    result.end_effector_pose = arm_planner_->cameraPoseToTool0(request);
+
+    if (cancelled && cancelled()) {
+      result.message = "Camera placement cancelled";
+      return result;
+    }
+
+    auto base_candidates = request.lock_current_base ?
+      std::vector<geometry_msgs::msg::PoseStamped>{base_planner_->currentBasePose()} :
+    base_planner_->generateBaseCandidates(request);
+
+    // With a locked base, validate a plan-only Pilz PTP trajectory from the
+    // captured current arm state. With a moving base, evaluate only the goal;
+    // the arm will be planned again after navigation.
+    std::optional<std::vector<double>> ptp_start;
+    if (request.lock_current_base) {
+      ptp_start = arm_planner_->currentArmJoints();
+    }
+
+    std::vector<CandidateSolution> arm_candidates;
+    MoveItDiagnostics moveit_diagnostics;
+    std::uint32_t evaluated = 0;
+    for (const auto & base_pose : base_candidates) {
+      if (cancelled && cancelled()) {
+        result.message = "Camera placement cancelled";
+        return result;
+      }
+
+      CandidateSolution candidate;
+      candidate.base_pose = base_pose;
+      if (arm_planner_->evaluateWithMoveIt(
+          base_pose, result.end_effector_pose, request.camera_link, ptp_start,
+          request.allow_long_arm_motion, candidate, moveit_diagnostics, cancelled))
+      {
+        arm_candidates.push_back(std::move(candidate));
+      }
+      ++evaluated;
+      publishFeedback(
+        feedback, "checking_moveit", evaluated,
+        static_cast<std::uint32_t>(arm_candidates.size()));
+    }
+
+    if (cancelled && cancelled()) {
+      result.message = "Camera placement cancelled";
+      return result;
+    }
+    if (arm_candidates.empty()) {
+      std::ostringstream message;
+      message << "MoveIt found no valid arm placement for any base candidate";
+      if (moveit_diagnostics.ptp_planning_failures > 0) {
+        message << " (" << moveit_diagnostics.ptp_planning_failures
+                << " IK solution(s) rejected because Pilz PTP from the current arm state "
+                   "failed or its trajectory collides)";
+      }
+      if (moveit_diagnostics.ptp_timeouts > 0) {
+        message << " (" << moveit_diagnostics.ptp_timeouts << " Pilz PTP request(s) timed out)";
+      }
+      if (moveit_diagnostics.long_motion_rejections > 0) {
+        message << " (" << moveit_diagnostics.long_motion_rejections
+                << " IK solution(s) rejected because the arm motion from the current "
+          "state is too long)";
+      }
+      if (moveit_diagnostics.elbow_down_rejections > 0) {
+        message << " (" << moveit_diagnostics.elbow_down_rejections
+                << " IK solution(s) rejected because the elbow is not up)";
+      }
+      if (arm_planner_->diagnosticsEnabled()) {
+        message << ". Diagnostics: collision-disabled IK succeeded for "
+                << moveit_diagnostics.collision_disabled_ik_successes
+                << " candidate(s) and failed for "
+                << moveit_diagnostics.collision_disabled_ik_failures << " candidate(s)";
+        if (moveit_diagnostics.collision_rejections > 0) {
+          message << "; state validity rejected "
+                  << moveit_diagnostics.collision_rejections << " candidate(s)";
+        }
+        if (moveit_diagnostics.valid_collision_disabled_solutions > 0) {
+          message << "; " << moveit_diagnostics.valid_collision_disabled_solutions
+                  << " collision-disabled solution(s) were state-valid, indicating an "
+            "IK timeout/search issue rather than collision";
+        }
+        if (!moveit_diagnostics.collision_pairs.empty()) {
+          message << "; contacts: ";
+          bool first = true;
+          for (const auto & pair : moveit_diagnostics.collision_pairs) {
+            if (!first) {
+              message << ", ";
+            }
+            message << pair;
+            first = false;
+          }
+        }
+        if (!moveit_diagnostics.collision_disabled_error_codes.empty()) {
+          message << "; collision-disabled MoveIt codes: ";
+          bool first = true;
+          for (const auto & entry : moveit_diagnostics.collision_disabled_error_codes) {
+            if (!first) {
+              message << ", ";
+            }
+            message << entry.first << " (" << entry.second << ')';
+            first = false;
+          }
+        }
+      }
+      result.message = message.str();
+      return result;
+    }
+
+    std::sort(
+      arm_candidates.begin(), arm_candidates.end(),
+      [](const CandidateSolution & left, const CandidateSolution & right) {
+        return left.arm_cost < right.arm_cost;
+      });
+
+    if (!request.lock_current_base &&
+      arm_candidates.size() > static_cast<std::size_t>(base_planner_->maxNavigationCandidates()))
+    {
+      arm_candidates.resize(static_cast<std::size_t>(base_planner_->maxNavigationCandidates()));
+    }
+
+    std::vector<CandidateSolution> valid_candidates;
+    evaluated = 0;
+    for (auto & candidate : arm_candidates) {
+      if (cancelled && cancelled()) {
+        result.message = "Camera placement cancelled";
+        return result;
+      }
+
+      const bool navigation_valid = request.lock_current_base ||
+        base_planner_->evaluateWithNav2(candidate, cancelled);
+      if (navigation_valid) {
+        candidate.score = calculateScore(candidate);
+        valid_candidates.push_back(std::move(candidate));
+      }
+      ++evaluated;
+      publishFeedback(
+        feedback, request.lock_current_base ? "validating_current_base" : "checking_nav2",
+        evaluated, static_cast<std::uint32_t>(valid_candidates.size()));
+    }
+
+    if (cancelled && cancelled()) {
+      result.message = "Camera placement cancelled";
+      return result;
+    }
+    if (valid_candidates.empty()) {
+      result.message = "Nav2 found no path to any kinematically valid base candidate";
+      return result;
+    }
+
+    const auto best = std::min_element(
+      valid_candidates.begin(), valid_candidates.end(),
+      [](const CandidateSolution & left, const CandidateSolution & right) {
+        return left.score < right.score;
+      });
+
+    result.success = true;
+    result.message = "Camera placement found";
+    result.base_pose = best->base_pose;
+    result.arm_solution = best->arm_solution;
+    result.score = best->score;
+    publishFeedback(
+      feedback, "completed", evaluated,
+      static_cast<std::uint32_t>(valid_candidates.size()));
+  } catch (const std::exception & exception) {
+    result.message = exception.what();
+  }
+  return result;
+}
+
+void CameraPlacementActionServer::validateRequest(const PlanningRequest & request) const
+{
+  if (request.camera_pose.header.frame_id != global_frame_) {
+    throw std::invalid_argument(
+            "camera_pose must use global frame '" + global_frame_ + "'");
+  }
+  if (request.camera_link.empty()) {
+    throw std::invalid_argument("camera_link cannot be empty");
+  }
+  if (!isFinitePose(request.camera_pose.pose)) {
+    throw std::invalid_argument("camera_pose contains non-finite values");
+  }
+  if (quaternionNorm(request.camera_pose.pose.orientation) <= kQuaternionEpsilon) {
+    throw std::invalid_argument("camera_pose orientation quaternion cannot be zero");
+  }
+}
+
+double CameraPlacementActionServer::calculateScore(const CandidateSolution & candidate) const
+{
+  return candidate.navigation_cost + 0.25 * candidate.arm_cost;
+}
+
+void CameraPlacementActionServer::publishFeedback(
+  const FeedbackCallback & callback,
+  const std::string & phase,
+  const std::uint32_t evaluated,
+  const std::uint32_t valid) const
+{
+  if (callback) {
+    callback(PlanningFeedback{phase, evaluated, valid});
+  }
+}
+
 
 }  // namespace renee_action_servers
 
